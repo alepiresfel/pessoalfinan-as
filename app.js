@@ -136,7 +136,7 @@ class Component extends React.Component {
       auth, authForm: {}, authErr: '', authMsg: '', authBusy: false, booting: true, cloud: 'ok', rev: 0,
       hideValues: !!prefs.hideValues, motion: prefs.motion || 'full', fontSize: prefs.fontSize || 16,
       month: now.toISOString().slice(0, 7), year: now.getFullYear(),
-      source: 'all', search: '', txType: 'all',
+      source: 'all', search: '', txType: 'all', quem: 'all',
       modal: null, form: {}, confirm: null, toast: null,
     };
     this._charts = {}; this._sig = '';
@@ -367,8 +367,10 @@ class Component extends React.Component {
     const b = {}; this.d.accounts.forEach(a => b[a.id] = a.balance || 0);
     this.d.transactions.forEach(t => {
       if (!t.account || !(t.account in b)) return;
+      if (this.isForOther(t)) return;                       // conta do parceiro não mexe no meu saldo
       if (t.type === 'receita' && t.status === 'recebido') b[t.account] += t.value;
-      if (t.type === 'despesa' && t.status === 'pago') b[t.account] -= t.value;
+      // saiu do meu bolso o valor cheio que EU paguei (a parte dele volta no acerto)
+      if (t.type === 'despesa' && t.status === 'pago' && this.paidByMe(t)) b[t.account] -= t.value;
     });
     return b;
   }
@@ -403,14 +405,47 @@ class Component extends React.Component {
   }
   /* Compras que compõem a fatura que vence no mês `monthKey`. */
   comprasDaFatura(card, monthKey) {
-    return this.d.transactions
+    return [...this.d.transactions, ...this.recCartao(monthKey)]
       .filter(t => t.card === card.id && t.type === 'despesa' && mk(this.faturaDue(card, t.dueDate || t.date)) === monthKey)
       .sort((a, b) => (a.dueDate || a.date).localeCompare(b.dueDate || b.date));
   }
-  faturas() {
+  meusCartoes() { return (this.d.cards || []).filter(c => !c._foreign); }
+  /* O cartão do parceiro não é assunto meu: mostro só que foi no cartão dele. */
+  origemLabel(t) {
+    if (!t.card) return t.payMethod || '';
+    const c = this.card(t.card);
+    if (!c) return t.payMethod || '';
+    return c._foreign ? 'cartão de ' + this.partner().split(' ')[0] : c.name;
+  }
+  realTx(i) { return (i && i._srcId) ? (this.d.transactions.find(t => t.id === i._srcId) || i) : i; }
+  /* Compras no cartão do parceiro que me dizem respeito: entram como linha
+     avulsa no mês em que a fatura dele vence — sem mostrar o cartão dele. */
+  comprasNoCartaoDoOutro(month) {
+    return this.d.transactions.filter(t => {
+      if (!t.card || t.type !== 'despesa') return false;
+      const c = this.card(t.card);
+      return !!(c && c._foreign && mk(this.faturaDue(c, t.dueDate || t.date)) === month);
+    }).map(t => {
+      const c = this.card(t.card);
+      const venc = this.faturaDue(c, t.dueDate || t.date);
+      return { ...t, _srcId: t.id, _realDue: t.dueDate, _noCartaoDoOutro: true, dueDate: venc };
+    });
+  }
+  /* Compras recorrentes no cartão: as repetições futuras precisam cair nas
+     faturas dos próximos meses, senão a assinatura some depois do 1º mês. */
+  recCartao(mesFatura) {
+    const vistos = new Set(), out = [];
+    [-2, -1, 0, 1].forEach(off => {
+      this.recFor(mk(addM(mesFatura + '-01', off)), true).forEach(r => {
+        if (r.card && !vistos.has(r.id)) { vistos.add(r.id); out.push(r); }
+      });
+    });
+    return out;
+  }
+  faturas(extras) {
     const groups = {};
-    this.d.transactions.filter(t => t.type === 'despesa' && t.card).forEach(t => {
-      const c = this.card(t.card); if (!c) return;
+    [...this.d.transactions, ...(extras || [])].filter(t => t.type === 'despesa' && t.card).forEach(t => {
+      const c = this.card(t.card); if (!c || c._foreign) return;
       const venc = this.faturaDue(c, t.dueDate || t.date);
       const k = t.card + '|' + mk(venc);
       (groups[k] = groups[k] || { card: c, key: mk(venc), due: venc, txs: [] }).txs.push(t);
@@ -425,10 +460,10 @@ class Component extends React.Component {
     });
   }
   // ocorrências futuras de recorrentes (virtuais), dentro de um mês alvo
-  recFor(monthKeyTarget) {
+  recFor(monthKeyTarget, comCartao) {
     const out = [];
     const step = { mensal: 1, anual: 12 };
-    this.d.transactions.filter(t => t.recurring && !t.card && !t.recSource).forEach(src => {
+    this.d.transactions.filter(t => t.recurring && !t.recSource && (comCartao ? !!t.card : !t.card)).forEach(src => {
       const anchor = src.dueDate || src.date;
       if (mk(anchor) >= monthKeyTarget) return;
       if (src.recurring === 'semanal') {
@@ -476,16 +511,17 @@ class Component extends React.Component {
   // tudo que cai num mês (planejamento mensal)
   monthItems(month) {
     const real = this.d.transactions.filter(t => !t.card && mk(t.dueDate || t.date) === month);
-    const fats = this.faturas().filter(f => mk(f.dueDate) === month);
+    const fats = this.faturas(this.recCartao(month)).filter(f => mk(f.dueDate) === month);
+    const outro = this.comprasNoCartaoDoOutro(month);
     const recs = this.recFor(month);
-    return [...real, ...fats, ...recs].sort((a, b) => (a.dueDate || a.date).localeCompare(b.dueDate || b.date));
+    return [...real, ...fats, ...outro, ...recs].sort((a, b) => (a.dueDate || a.date).localeCompare(b.dueDate || b.date));
   }
 
   /* ===== ações ===== */
   openTx(mode, tx) {
     const base = { desc: '', value: 0, type: 'despesa', category: '', date: todayISO(), dueDate: '', payMethod: 'Pix', card: '', account: this.d.accounts[0] ? this.d.accounts[0].id : '', status: 'pendente', recurring: '', installments: '', installment: '', notes: '', tags: [], subcategory: '', split: false, payer: 'eu', dono: 'me', payerId: (this.me || {}).id || '', more: false };
     const form = mode === 'edit' && tx
-      ? { ...base, ...tx, tags: tx.tags || [], dono: tx.split ? 'split' : (this.isForOther(tx) ? 'other' : 'me'), payerId: this.payerOf(tx), more: true }
+      ? { ...base, ...tx, tags: tx.tags || [], dueDate: tx._realDue || tx.dueDate, dono: tx.split ? 'split' : (this.isForOther(tx) ? 'other' : 'me'), payerId: this.payerOf(tx), more: true }
       : base;
     this.setState({ modal: { type: 'tx', mode }, form });
   }
@@ -498,6 +534,7 @@ class Component extends React.Component {
     const me = this.me, outro = this.otherUser();
     const clean = o => {
       const c = { ...o }; delete c.more;
+      Object.keys(c).forEach(k => { if (k.charAt(0) === '_') delete c[k]; });
       if (c.payMethod !== 'Cartão') c.card = '';
       if (!c.dueDate) c.dueDate = c.date;
       // "de quem é" vira dono + visibilidade
@@ -760,13 +797,16 @@ class Component extends React.Component {
     else if (s.source && s.source.startsWith('card:')) tx = tx.filter(t => t.card === s.source.slice(5));
     else if (s.source === 'outros') tx = tx.filter(t => !t.card && t.payMethod !== 'Pix' && !t.recurring);
     if (s.txType !== 'all') tx = tx.filter(t => t.type === s.txType);
+    if (s.quem === 'me') tx = tx.filter(t => !t.split && !this.isForOther(t));
+    else if (s.quem === 'other') tx = tx.filter(t => this.isForOther(t));
+    else if (s.quem === 'split') tx = tx.filter(t => !!t.split);
     if (s.search.trim()) { const q = s.search.toLowerCase(); tx = tx.filter(t => (t.desc || '').toLowerCase().includes(q) || this.catName(t.category).toLowerCase().includes(q) || (t.notes || '').toLowerCase().includes(q) || (t.tags || []).join(' ').toLowerCase().includes(q)); }
     tx.sort((a, b) => (b.dueDate || b.date).localeCompare(a.dueDate || a.date));
-    const ent = tx.filter(t => t.type === 'receita').reduce((a, t) => a + t.value, 0);
+    const ent = tx.filter(t => t.type === 'receita').reduce((a, t) => a + this.myShare(t), 0);
     const sai = tx.filter(t => t.type === 'despesa').reduce((a, t) => a + this.myShare(t), 0);
     const activeCard = s.source.startsWith('card:') ? this.card(s.source.slice(5)) : null;
 
-    const sources = [['all', 'Tudo'], ['pix', 'Pix'], ['rec', 'Recorrentes'], ...this.d.cards.map(c => ['card:' + c.id, c.name]), ['outros', 'Outros']];
+    const sources = [['all', 'Tudo'], ['pix', 'Pix'], ['rec', 'Recorrentes'], ...this.meusCartoes().map(c => ['card:' + c.id, c.name]), ['outros', 'Outros']];
     let lastMonth = '';
     return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
       // atalhos rápidos
@@ -775,7 +815,7 @@ class Component extends React.Component {
           h('span', { style: { fontSize: '.78rem', fontWeight: 700, color: 'var(--muted)', marginRight: '2px' } }, 'Lançar rápido:'),
           h('button', { onClick: () => { this.openTx('add'); setTimeout(() => this.setF({ type: 'despesa', payMethod: 'Pix' }), 0); }, style: this.btn('soft', { padding: '8px 14px', fontSize: '.83rem' }) }, 'Saída no Pix'),
           h('button', { onClick: () => { this.openTx('add'); setTimeout(() => this.setF({ type: 'receita', payMethod: 'Pix', status: 'recebido' }), 0); }, style: this.btn('soft', { padding: '8px 14px', fontSize: '.83rem', background: 'var(--pos-bg)', color: 'var(--pos)' }) }, 'Entrada'),
-          ...this.d.cards.map(c => h('button', { key: c.id, onClick: () => { this.openTx('add'); setTimeout(() => this.setF({ type: 'despesa', payMethod: 'Cartão', card: c.id }), 0); }, style: this.btn('ghost', { padding: '8px 14px', fontSize: '.83rem', borderColor: c.color, color: c.color }) }, c.name)),
+          ...this.meusCartoes().map(c => h('button', { key: c.id, onClick: () => { this.openTx('add'); setTimeout(() => this.setF({ type: 'despesa', payMethod: 'Cartão', card: c.id }), 0); }, style: this.btn('ghost', { padding: '8px 14px', fontSize: '.83rem', borderColor: c.color, color: c.color }) }, c.name)),
           h('button', { onClick: () => { this.openTx('add'); setTimeout(() => this.setF({ type: 'despesa', recurring: 'mensal', more: true }), 0); }, style: this.btn('ghost', { padding: '8px 14px', fontSize: '.83rem' }) }, '↻ Recorrente')),
         h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap' } },
           h('div', { style: { position: 'relative', flex: '1 1 220px' } },
@@ -784,6 +824,11 @@ class Component extends React.Component {
           h('select', { value: s.txType, onChange: e => this.setState({ txType: e.target.value }), style: this.inp({ width: 'auto' }) }, h('option', { value: 'all' }, 'Entradas e saídas'), h('option', { value: 'receita' }, 'Só entradas'), h('option', { value: 'despesa' }, 'Só saídas')))),
       // filtros por origem
       h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } }, ...sources.map(([v, l]) => this.chip(l, s.source === v, () => this.setState({ source: v }), v.startsWith('card:') ? (this.card(v.slice(5)) || {}).color : null))),
+      // filtro por dono
+      this.otherUser() && h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
+        h('span', { style: { fontSize: '.76rem', fontWeight: 700, color: 'var(--muted)' } }, 'De quem:'),
+        ...[['all', 'Tudo'], ['me', 'Minhas'], ['other', 'De ' + this.partner()], ['split', 'Divididas']]
+          .map(([v, l]) => this.chip(l, (s.quem || 'all') === v, () => this.setState({ quem: v }), 'var(--plum)'))),
       // resumo do cartão selecionado
       activeCard && this.cardStrip(activeCard),
       // totais
@@ -813,25 +858,25 @@ class Component extends React.Component {
   }
   txRow(t) {
     const rec = t.type === 'receita';
-    const tagStyle = { fontSize: '.68rem', fontWeight: 700, padding: '2px 8px', borderRadius: '999px' };
-    return h('div', { key: t.id, style: { display: 'flex', alignItems: 'center', gap: '12px', padding: '11px 14px', borderRadius: '18px', flexWrap: 'wrap' } },
-      h('div', { style: { width: '38px', height: '38px', borderRadius: '13px', flexShrink: 0, background: this.catColor(t.category) + '26', color: this.catColor(t.category), display: 'grid', placeItems: 'center' } }, this.ico(rec ? 'M12 19V5m0 0l-6 6m6-6l6 6' : 'M12 5v14m0 0l6-6m-6 6l-6-6', 18)),
-      h('div', { style: { flex: '1 1 160px', minWidth: 0 } },
-        h('div', { style: { fontWeight: 700, fontSize: '.92rem' } }, t.desc, t.installments > 1 && h('span', { style: { fontWeight: 400, color: 'var(--muted)', fontSize: '.76rem' } }, `  ${t.installment}/${t.installments}`)),
-        h('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center', marginTop: '3px' } },
-          h('span', { style: { fontSize: '.74rem', color: 'var(--muted)' } }, isoBR(t.dueDate || t.date)),
-          h('span', { style: { ...tagStyle, background: this.catColor(t.category) + '22', color: this.catColor(t.category) } }, this.catName(t.category)),
-          t.card ? h('span', { style: { ...tagStyle, background: (this.card(t.card) || {}).color + '22', color: (this.card(t.card) || {}).color } }, (this.card(t.card) || {}).name)
-            : h('span', { style: { ...tagStyle, background: 'rgba(70,76,86,.1)', color: 'var(--muted)' } }, t.payMethod || '—'),
-          t.recurring && h('span', { style: { ...tagStyle, background: 'var(--pink-soft)', color: 'var(--pink-deep)' } }, '↻ ' + t.recurring),
-          this.isDone(t) && h('span', { style: { ...tagStyle, background: 'var(--pos-bg)', color: 'var(--pos)' } }, rec ? 'recebido' : 'pago'),
-          this.isForOther(t) && h('span', { style: { ...tagStyle, background: 'rgba(142,92,134,.16)', color: 'var(--plum)' } }, 'de ' + this.ownerName(t)),
-          t.split && h('span', { style: { ...tagStyle, background: 'rgba(142,92,134,.16)', color: 'var(--plum)' } }, '÷ dividida'))),
+    const meu = this.myShare(t), partido = !!t.split || this.isForOther(t);
+    const marca = t.split ? '÷ dividida' : (this.isForOther(t) ? 'de ' + this.ownerName(t) : '');
+    const origem = this.origemLabel(t);
+    const linha = [isoBR(t.dueDate || t.date), this.catName(t.category), origem].filter(Boolean).join(' · ');
+    const acao = (title, path, onClick, color) => h('button', { title, onClick, style: this.iconBtn(color) }, this.ico(path, 15));
+    return h('div', { key: t.id, style: { display: 'flex', alignItems: 'center', gap: '12px', padding: '9px 12px', borderRadius: '14px' } },
+      h('div', { title: this.catName(t.category), style: { width: '9px', height: '9px', borderRadius: '50%', flexShrink: 0, background: this.catColor(t.category) } }),
+      h('div', { style: { flex: '1 1 140px', minWidth: 0 } },
+        h('div', { style: { fontWeight: 600, fontSize: '.88rem', lineHeight: 1.3, textWrap: 'pretty' } }, t.desc,
+          t.installments > 1 && h('span', { style: { fontWeight: 400, color: 'var(--muted)', fontSize: '.74rem' } }, `  ${t.installment}/${t.installments}`),
+          t.recurring && h('span', { style: { color: 'var(--pink-deep)', fontWeight: 700, fontSize: '.72rem' } }, '  ↻')),
+        h('div', { style: { fontSize: '.73rem', color: 'var(--muted)', marginTop: '1px', textWrap: 'pretty' } }, linha,
+          marca && h('span', { style: { color: 'var(--plum)', fontWeight: 700 } }, '  · ' + marca))),
+      this.isDone(t) && h('span', { title: rec ? 'recebido' : 'pago', style: { color: 'var(--pos)', flexShrink: 0, display: 'grid' } }, this.ico('M20 6L9 17l-5-5', 15)),
       this.valueCell(t, rec, false),
-      h('div', { style: { display: 'flex', gap: '2px' } },
-        h('button', { title: 'Editar', onClick: () => this.openTx('edit', t), style: this.iconBtn() }, this.ico('M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', 16)),
-        h('button', { title: 'Duplicar', onClick: () => this.dupTx(t), style: this.iconBtn() }, this.ico('M8 8h12v12H8zM4 16V4h12', 16)),
-        h('button', { title: 'Excluir', onClick: () => this.delTx(t.id), style: this.iconBtn('var(--neg)') }, this.ico('M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14', 16))));
+      h('div', { style: { display: 'flex', gap: '1px', opacity: .5, flexShrink: 0 } },
+        acao('Editar', 'M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', () => this.openTx('edit', t)),
+        acao('Duplicar', 'M8 8h12v12H8zM4 16V4h12', () => this.dupTx(t)),
+        acao('Excluir', 'M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14', () => this.delTx(t.id), 'var(--neg)')));
   }
   // edição rápida de valor (clique no valor)
   valueCell(item, positive, compact) {
@@ -844,9 +889,14 @@ class Component extends React.Component {
         h('button', { title: 'Salvar', onClick: () => this.commitEdit(), style: this.iconBtn('var(--pos)') }, this.ico('M20 6L9 17l-5-5', 15)),
         h('button', { title: 'Cancelar', onClick: () => this.setState({ editVal: null }), style: this.iconBtn() }, this.ico('M18 6L6 18M6 6l12 12', 15)));
     }
-    const txt = (compact ? '' : (positive ? '+' : '−')) + this.m(fmt(item.value));
-    const col = compact && this.isDone(item) ? 'var(--muted)' : positive ? 'var(--pos)' : 'var(--ink)';
-    if (item.isFatura) return h('span', { title: 'Soma das compras do cartão', style: this.disp({ fontSize: fs, minWidth: w, textAlign: 'right', color: col }) }, txt);
+    // o valor exibido é sempre a SUA parte — o valor cheio só aparece ao editar
+    const meu = this.myShare(item);
+    const partido = !!item.split || this.isForOther(item) || (item.isFatura && meu !== item.value);
+    const txt = (partido && meu === 0) ? '—' : (compact ? '' : (positive ? '+' : '−')) + this.m(fmt(meu));
+    const col = (partido && meu === 0) ? 'var(--muted)' : compact && this.isDone(item) ? 'var(--muted)' : positive ? 'var(--pos)' : 'var(--ink)';
+    const base = this.disp({ fontSize: fs, minWidth: w, textAlign: 'right', color: col });
+    if (item.isFatura) return h('span', { title: 'Sua parte desta fatura', style: base }, txt);
+    if (partido) return h('button', { title: 'Sua parte — clique para abrir o lançamento', onClick: () => this.openTx('edit', this.realTx(item)), style: { ...base, background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 0' } }, txt);
     return h('button', { title: 'Clique para alterar o valor', onClick: () => this.setState({ editVal: { id: item.id, value: item.value, item } }), style: this.disp({ fontSize: fs, minWidth: w, textAlign: 'right', color: col, background: 'transparent', border: 'none', borderBottom: '1.5px dashed rgba(70,76,86,.3)', cursor: 'pointer', padding: '2px 0' }) }, txt);
   }
   commitEdit() {
@@ -872,7 +922,7 @@ class Component extends React.Component {
     const items = this.monthItems(month);
     const ent = items.filter(i => i.type === 'receita');
     const sai = items.filter(i => i.type === 'despesa');
-    const totEnt = ent.reduce((a, i) => a + i.value, 0);
+    const totEnt = ent.reduce((a, i) => a + this.myShare(i), 0);
     const totSai = sai.reduce((a, i) => a + this.myShare(i), 0);
     const pagoSai = sai.filter(i => this.isDone(i)).reduce((a, i) => a + this.myShare(i), 0);
     const acerto = this.settlement(month);
@@ -911,14 +961,16 @@ class Component extends React.Component {
           h('div', { style: { fontSize: '.78rem', color: 'var(--muted)' } }, 'o que vocês pagaram um pelo outro neste mês')),
         h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap' } },
           h('div', { style: { padding: '10px 16px', borderRadius: '16px', background: 'var(--pos-bg)' } },
-            h('div', { style: { fontSize: '.72rem', color: 'var(--muted)', fontWeight: 700 } }, 'A receber dele'),
+            h('div', { style: { fontSize: '.72rem', color: 'var(--muted)', fontWeight: 700 } }, this.partner().split(' ')[0] + ' te deve'),
             h('div', { style: this.disp({ fontSize: '1.1rem', color: 'var(--pos)' }) }, this.m(fmt(acerto.receber)))),
           h('div', { style: { padding: '10px 16px', borderRadius: '16px', background: 'var(--neg-bg)' } },
-            h('div', { style: { fontSize: '.72rem', color: 'var(--muted)', fontWeight: 700 } }, 'A pagar pra ele'),
+            h('div', { style: { fontSize: '.72rem', color: 'var(--muted)', fontWeight: 700 } }, 'Você deve a ' + this.partner().split(' ')[0]),
             h('div', { style: this.disp({ fontSize: '1.1rem', color: 'var(--neg)' }) }, this.m(fmt(acerto.pagar)))),
           h('div', { style: { padding: '10px 16px', borderRadius: '16px', background: 'var(--pink-soft)' } },
-            h('div', { style: { fontSize: '.72rem', color: 'var(--pink-deep)', fontWeight: 700 } }, acerto.saldo >= 0 ? 'Sobra pra você' : 'Você deve'),
-            h('div', { style: this.disp({ fontSize: '1.1rem', color: 'var(--pink-deep)' }) }, this.m(fmt(Math.abs(acerto.saldo))))))),
+            h('div', { style: { fontSize: '.72rem', color: 'var(--pink-deep)', fontWeight: 700 } }, 'No fim das contas'),
+            h('div', { style: this.disp({ fontSize: '1rem', color: 'var(--pink-deep)' }) },
+              acerto.saldo === 0 ? 'estão quites'
+                : (acerto.saldo > 0 ? this.partner().split(' ')[0] + ' te deve ' : 'você deve ') + this.m(fmt(Math.abs(acerto.saldo))))))),
       // abas
       h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
         this.chip('Contas do mês', tab === 'contas', () => this.setState({ mensalTab: 'contas' })),
@@ -931,7 +983,7 @@ class Component extends React.Component {
               h('div', { key: label, style: this.glass({ padding: '6px 8px 10px' }) },
                 h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 12px 8px' } },
                   h('span', { style: this.disp({ fontSize: '.96rem', color }) }, `${label} (${list.length})`),
-                  h('span', { style: { fontWeight: 700, fontSize: '.88rem' } }, this.m(fmt(list.reduce((a, i) => a + i.value, 0))))),
+                  h('span', { style: { fontWeight: 700, fontSize: '.88rem' } }, this.m(fmt(list.reduce((a, i) => a + this.myShare(i), 0))))),
                 ...list.map(i => this.monthRow(i, today))))),
           h('div', { style: this.glass({ padding: '18px 20px' }) },
             this.head('Entradas do mês'),
@@ -940,8 +992,8 @@ class Component extends React.Component {
   }
   // aba "Cartões de crédito" dentro do planejamento mensal
   mensalCartoes(month) {
-    if (this.d.cards.length === 0) return this.empty('Nenhum cartão', 'Cadastre seus cartões em Configurações para lançar as compras da fatura aqui.', h('button', { onClick: () => this.setState({ view: 'config' }), style: this.btn('primary') }, 'Ir para Configurações'), 'queen-card');
-    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } }, ...this.d.cards.map(c => {
+    if (this.meusCartoes().length === 0) return this.empty('Nenhum cartão', 'Cadastre seus cartões em Configurações para lançar as compras da fatura aqui.', h('button', { onClick: () => this.setState({ view: 'config' }), style: this.btn('primary') }, 'Ir para Configurações'), 'queen-card');
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } }, ...this.meusCartoes().map(c => {
       const compras = this.comprasDaFatura(c, month);
       const total = compras.reduce((a, t) => a + t.value, 0);
       const minha = compras.reduce((a, t) => a + this.myShare(t), 0);
@@ -951,9 +1003,9 @@ class Component extends React.Component {
             h('div', { style: this.disp({ fontSize: '1.05rem' }) }, c.name),
             h('div', { style: { fontSize: '.75rem', opacity: .88 } }, `Fecha ${isoBR(this.faturaClose(c, month))} • vence ${isoBR(this.faturaDue(c, this.faturaClose(c, month)))}`)),
           h('div', { style: { textAlign: 'right' } },
-            h('div', { style: { fontSize: '.72rem', opacity: .88 } }, 'Total da fatura'),
-            h('div', { style: this.disp({ fontSize: '1.4rem' }) }, this.m(fmt(total))),
-            minha !== total && h('div', { style: { fontSize: '.76rem', opacity: .92 } }, 'sua parte ' + this.m(fmt(minha))))),
+            h('div', { style: { fontSize: '.72rem', opacity: .88 } }, 'Sua parte'),
+            h('div', { style: this.disp({ fontSize: '1.4rem' }) }, this.m(fmt(minha))),
+            minha !== total && h('div', { style: { fontSize: '.72rem', opacity: .8 } }, 'fatura inteira ' + this.m(fmt(total))))),
         h('div', { style: { padding: '14px 18px', display: 'flex', gap: '9px', flexWrap: 'wrap', borderBottom: compras.length ? '1px solid var(--stroke)' : 'none' } },
           h('button', { onClick: () => this.openCardBuy(c, month), style: this.btn('primary', { fontSize: '.83rem' }) }, this.ico('M12 5v14M5 12h14', 15), 'Lançar compra'),
           h('button', { onClick: () => this.openImport(c), style: this.btn('ghost', { fontSize: '.83rem' }) }, this.ico('M12 3v12m0 0l-4-4m4 4l4-4M5 21h14', 15), 'Importar PDF/CSV')),
@@ -1019,8 +1071,8 @@ class Component extends React.Component {
     const txY = this.d.transactions.filter(t => (t.dueDate || t.date).slice(0, 4) === String(y));
     const rowFor = k => {
       const list = txY.filter(t => mk(t.dueDate || t.date) === k);
-      const e = list.filter(t => t.type === 'receita').reduce((a, t) => a + t.value, 0);
-      const s = list.filter(t => t.type === 'despesa').reduce((a, t) => a + t.value, 0);
+      const e = list.filter(t => t.type === 'receita').reduce((a, t) => a + this.myShare(t), 0);
+      const s = list.filter(t => t.type === 'despesa').reduce((a, t) => a + this.myShare(t), 0);
       return { e, s, r: e - s };
     };
     const rows = months.map(rowFor);
@@ -1029,8 +1081,8 @@ class Component extends React.Component {
     const catTotals = {};
     txY.filter(t => t.type === 'despesa').forEach(t => {
       catTotals[t.category] = catTotals[t.category] || { total: 0, m: Array(12).fill(0) };
-      catTotals[t.category].total += t.value;
-      catTotals[t.category].m[+mk(t.dueDate || t.date).slice(5) - 1] += t.value;
+      catTotals[t.category].total += this.myShare(t);
+      catTotals[t.category].m[+mk(t.dueDate || t.date).slice(5) - 1] += this.myShare(t);
     });
     const catRows = Object.entries(catTotals).sort((a, b) => b[1].total - a[1].total);
     const maxCat = catRows.length ? catRows[0][1].total : 1;
@@ -1346,8 +1398,8 @@ class Component extends React.Component {
     Chart.defaults.color = css.getPropertyValue('--ink').trim();
     const y = this.state.year;
     const months = Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, '0')}`);
-    const ent = months.map(k => this.d.transactions.filter(t => mk(t.dueDate || t.date) === k && t.type === 'receita').reduce((a, t) => a + t.value, 0));
-    const sai = months.map(k => this.d.transactions.filter(t => mk(t.dueDate || t.date) === k && t.type === 'despesa').reduce((a, t) => a + t.value, 0));
+    const ent = months.map(k => this.d.transactions.filter(t => mk(t.dueDate || t.date) === k && t.type === 'receita').reduce((a, t) => a + this.myShare(t), 0));
+    const sai = months.map(k => this.d.transactions.filter(t => mk(t.dueDate || t.date) === k && t.type === 'despesa').reduce((a, t) => a + this.myShare(t), 0));
     this._charts.y = new Chart(el, {
       type: 'bar',
       data: { labels: MONTHS_S, datasets: [{ label: 'Entradas', data: ent, backgroundColor: css.getPropertyValue('--pos').trim(), borderRadius: 10, maxBarThickness: 26 }, { label: 'Saídas', data: sai, backgroundColor: css.getPropertyValue('--pink').trim(), borderRadius: 10, maxBarThickness: 26 }] },
@@ -1455,7 +1507,7 @@ class Component extends React.Component {
         // forma de pagamento
         this.field('Como pagou?', h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap' } }, ...PAY_METHODS.map(p => this.chip(p, f.payMethod === p, () => this.setF({ payMethod: p, card: p === 'Cartão' ? (f.card || (this.d.cards[0] || {}).id || '') : '' }))))),
         f.payMethod === 'Cartão' && h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
-          this.field('Qual cartão?', h('select', { value: f.card, onChange: e => this.setF({ card: e.target.value }), style: this.inp() }, h('option', { value: '' }, 'Escolher…'), ...this.d.cards.map(c => h('option', { key: c.id, value: c.id }, c.name)))),
+          this.field('Qual cartão?', h('select', { value: f.card, onChange: e => this.setF({ card: e.target.value }), style: this.inp() }, h('option', { value: '' }, 'Escolher…'), ...this.meusCartoes().map(c => h('option', { key: c.id, value: c.id }, c.name)))),
           this.state.modal.mode === 'add' && this.field('Parcelas', h('input', { type: 'number', min: 1, value: f.installments, onChange: e => this.setF({ installments: e.target.value }), placeholder: '1', style: this.inp() }))),
         // recorrência
         this.field('Se repete?', h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap' } },
