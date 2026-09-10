@@ -1,0 +1,1454 @@
+const h = React.createElement;
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+const STORE_KEY = 'financaPessoal_v1';
+const PREFS_KEY = 'financaGroovy_prefs_v1';
+const AUTH_KEY = 'financaGroovy_auth_v1';
+const hashPw = (login, pw) => { const s = 'pr0sp|' + (login || '').toLowerCase() + '|' + pw; let a = 5381, b = 52711; for (let i = 0; i < s.length; i++) { a = ((a << 5) + a + s.charCodeAt(i)) >>> 0; b = ((b << 5) + b + s.charCodeAt(s.length - 1 - i)) >>> 0; } return a.toString(36) + b.toString(36); };
+
+/* ===== formatação ===== */
+const fmt = n => 'R$ ' + (Number(n) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmtK = n => { const v = Number(n) || 0; return Math.abs(v) >= 1000 ? 'R$ ' + (v / 1000).toFixed(1).replace('.', ',') + 'k' : fmt(v); };
+const pct = n => (Math.round((Number(n) || 0) * 10) / 10).toLocaleString('pt-BR') + '%';
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const isoBR = iso => { if (!iso) return '—'; const p = iso.split('-'); return `${p[2]}/${p[1]}/${p[0]}`; };
+const mk = iso => (iso || '').slice(0, 7);
+const addM = (iso, n) => { const d = new Date(iso + 'T12:00:00'); d.setMonth(d.getMonth() + n); return d.toISOString().slice(0, 10); };
+const dayDiff = (a, b) => Math.round((new Date(b + 'T12:00:00') - new Date(a + 'T12:00:00')) / 86400000);
+const MONTHS = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+const MONTHS_S = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+const mkLong = k => { const [y, m] = k.split('-'); return `${MONTHS[+m - 1]} de ${y}`; };
+
+const PAY_METHODS = ['Pix', 'Débito', 'Dinheiro', 'Boleto', 'Cartão'];
+
+const DEFAULT_CATS = [
+  ['Moradia', '#E8557F'], ['Alimentação', '#F58A5E'], ['Mercado', '#E5AE49'], ['Transporte', '#8E5C86'],
+  ['Saúde', '#4E9E76'], ['Beleza', '#EC7BA6'], ['Cuidados pessoais', '#C98BC0'], ['Educação', '#6E8DC4'],
+  ['Lazer', '#F2A93B'], ['Assinaturas', '#A87BD1'], ['Compras', '#E0688C'], ['Presentes', '#F09BB5'],
+  ['Família', '#69AF9A'], ['Pets', '#C9A05C'], ['Viagens', '#5FAFC4'], ['Impostos', '#9A7C88'],
+  ['Dívidas', '#DE6C63'], ['Investimentos', '#3E9C7E'], ['Reserva', '#6FA8C9'], ['Salário', '#4E9E76'], ['Outros', '#A3899A']
+].map(([name, color]) => ({ id: uid(), name, color }));
+const catIdOf = (cats, n) => { const c = cats.find(x => x.name === n); return c ? c.id : ''; };
+
+function emptyData() { return { accounts: [], cards: [], transactions: [], categories: DEFAULT_CATS.map(c => ({ ...c })), budgets: [], goals: [], meta: { demo: false, monthlyBudget: 0 } }; }
+
+function buildDemo() {
+  const cats = DEFAULT_CATS.map(c => ({ ...c })); const C = n => catIdOf(cats, n);
+  const accounts = [
+    { id: uid(), name: 'Conta principal', type: 'banco', balance: 3200, color: '#E8557F' },
+    { id: uid(), name: 'Carteira', type: 'dinheiro', balance: 150, color: '#F58A5E' }];
+  const cards = [
+    { id: uid(), name: 'Cartão Roxo', brand: 'Mastercard', limit: 5000, closeDay: 3, dueDay: 12, color: '#8E5C86', payAccount: accounts[0].id },
+    { id: uid(), name: 'Cartão Rosa', brand: 'Visa', limit: 3000, closeDay: 20, dueDay: 28, color: '#E8557F', payAccount: accounts[0].id }];
+  const n = new Date(), y = n.getFullYear(), m = n.getMonth();
+  const d = (day, mo = 0) => new Date(y, m + mo, day).toISOString().slice(0, 10);
+  const t = []; const add = o => t.push({ id: uid(), tags: [], notes: '', subcategory: '', ...o });
+  add({ desc: 'Salário', value: 4800, type: 'receita', category: C('Salário'), account: accounts[0].id, date: d(5), dueDate: d(5), status: 'recebido', payMethod: 'Pix', recurring: 'mensal' });
+  add({ desc: 'Aluguel', value: 1400, type: 'despesa', category: C('Moradia'), account: accounts[0].id, date: d(10), dueDate: d(10), status: 'pago', payMethod: 'Boleto', recurring: 'mensal' });
+  add({ desc: 'Internet', value: 110, type: 'despesa', category: C('Moradia'), account: accounts[0].id, date: d(15), dueDate: d(15), status: 'pendente', payMethod: 'Pix', recurring: 'mensal' });
+  add({ desc: 'Academia', value: 99, type: 'despesa', category: C('Saúde'), account: accounts[0].id, date: d(8), dueDate: d(8), status: 'pago', payMethod: 'Pix', recurring: 'mensal' });
+  add({ desc: 'Mercado', value: 520, type: 'despesa', category: C('Mercado'), card: cards[0].id, date: d(6), dueDate: d(6), status: 'pendente', payMethod: 'Cartão' });
+  add({ desc: 'Restaurante', value: 96, type: 'despesa', category: C('Alimentação'), card: cards[1].id, date: d(9), dueDate: d(9), status: 'pendente', payMethod: 'Cartão' });
+  add({ desc: 'Uber', value: 42, type: 'despesa', category: C('Transporte'), account: accounts[0].id, date: d(11), dueDate: d(11), status: 'pago', payMethod: 'Pix' });
+  add({ desc: 'Streaming', value: 55, type: 'despesa', category: C('Assinaturas'), card: cards[0].id, date: d(3), dueDate: d(3), status: 'pendente', payMethod: 'Cartão', recurring: 'mensal' });
+  const g = uid();
+  for (let i = 1; i <= 6; i++) add({ desc: 'Notebook', value: 350, type: 'despesa', category: C('Compras'), card: cards[0].id, date: d(2, i - 1), dueDate: d(2, i - 1), status: i === 1 ? 'pendente' : 'agendado', payMethod: 'Cartão', installmentGroup: g, installment: i, installments: 6 });
+  add({ desc: 'Salário', value: 4800, type: 'receita', category: C('Salário'), account: accounts[0].id, date: d(5, -1), status: 'recebido', payMethod: 'Pix' });
+  add({ desc: 'Aluguel', value: 1400, type: 'despesa', category: C('Moradia'), account: accounts[0].id, date: d(10, -1), status: 'pago', payMethod: 'Boleto' });
+  add({ desc: 'Mercado', value: 610, type: 'despesa', category: C('Mercado'), card: cards[0].id, date: d(7, -1), status: 'pago', payMethod: 'Cartão' });
+  const goals = [
+    { id: uid(), name: 'Reserva de emergência', kind: 'Reserva', total: 15000, saved: 5200, date: d(1, 12), priority: 'alta', monthly: 700 },
+    { id: uid(), name: 'Viagem', kind: 'Objetivo', total: 8000, saved: 1500, date: d(1, 9), priority: 'média', monthly: 600 }];
+  return { accounts, cards, transactions: t, categories: cats, budgets: [], goals, meta: { demo: true, monthlyBudget: 0 } };
+}
+
+const SUBS = {
+  dashboard: 'O que vence e o que falta pagar no período escolhido',
+  lancamentos: 'Tudo que entrou e saiu, com filtros e busca',
+  mensal: 'Contas do mês, pagamentos e acerto da divisão',
+  anual: 'Comparativo mês a mês por categoria',
+  metas: 'Reservas, investimentos e objetivos',
+  config: 'Cartões, contas, categorias, acesso e backup',
+};
+
+const NAV = [
+  ['dashboard', 'Painel', 'M4 13h6V4H4v9zm0 7h6v-5H4v5zm10 0h6V11h-6v9zm0-16v5h6V4h-6z'],
+  ['lancamentos', 'Lançamentos', 'M12 5v14M5 12h14'],
+  ['mensal', 'Planejamento mensal', 'M4 5h16v15H4zM4 9h16M9 3v4M15 3v4'],
+  ['anual', 'Relatório anual', 'M4 20V4M4 20h16M8 17V9M13 17v-5M18 17V6'],
+  ['metas', 'Metas', 'M12 21s7-5.2 7-10.6A7 7 0 005 10.4C5 15.8 12 21 12 21zM12 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z'],
+  ['config', 'Configurações', 'M12 8.5a3.5 3.5 0 100 7 3.5 3.5 0 000-7zM3.5 12h2m13 0h2M12 3.5v2m0 13v2M5.9 5.9l1.4 1.4m9.4 9.4l1.4 1.4m0-12.2l-1.4 1.4M7.3 16.7l-1.4 1.4'],
+];
+
+/* ===== camada de nuvem (Supabase) ===== */
+window.SB = (window.FINCONFIG && window.FINCONFIG.url && window.FINCONFIG.anonKey && window.supabase)
+  ? window.supabase.createClient(window.FINCONFIG.url, window.FINCONFIG.anonKey)
+  : null;
+
+const COLLECTIONS = ['accounts', 'cards', 'transactions', 'categories', 'budgets', 'goals'];
+
+function normalizeDoc(d) {
+  const out = Object.assign(emptyData(), (d && typeof d === 'object') ? d : {});
+  COLLECTIONS.forEach(k => { if (!Array.isArray(out[k])) out[k] = []; });
+  if (!out.categories.length) out.categories = DEFAULT_CATS.map(c => ({ ...c }));
+  if (!out.meta || typeof out.meta !== 'object') out.meta = { demo: false, monthlyBudget: 0 };
+  return out;
+}
+
+/* união por id — usada quando duas pessoas salvam ao mesmo tempo */
+function mergeDocs(remote, mine) {
+  const out = { ...remote, ...mine, meta: { ...(remote.meta || {}), ...(mine.meta || {}) } };
+  COLLECTIONS.forEach(k => {
+    const byId = new Map();
+    (remote[k] || []).forEach(x => x && x.id && byId.set(x.id, x));
+    (mine[k] || []).forEach(x => x && x.id && byId.set(x.id, x));
+    out[k] = [...byId.values()];
+  });
+  return out;
+}
+
+/* backup antigo: os donos eram ids do navegador, aqui viram ids do Supabase */
+function remapOwners(doc, users, myId) {
+  const known = new Set((users || []).map(u => u.id));
+  const keys = ['transactions', 'accounts', 'cards', 'goals'];
+  const legacy = [];
+  keys.forEach(k => (doc[k] || []).forEach(x => { if (x && x.owner && !known.has(x.owner) && legacy.indexOf(x.owner) < 0) legacy.push(x.owner); }));
+  if (!legacy.length) return doc;
+  const others = (users || []).filter(u => u.id !== myId).map(u => u.id);
+  const map = {}; map[legacy[0]] = myId;
+  legacy.slice(1).forEach((id, i) => { map[id] = others[i] || myId; });
+  keys.forEach(k => { doc[k] = (doc[k] || []).map(x => (x && x.owner && map[x.owner]) ? { ...x, owner: map[x.owner] } : x); });
+  return doc;
+}
+
+class Component extends React.Component {
+  constructor(props) {
+    super(props);
+    let prefs;
+    try { const r = localStorage.getItem(PREFS_KEY); prefs = r ? JSON.parse(r) : {}; } catch (e) { prefs = {}; }
+    const data = emptyData();
+    const auth = { users: [], currentId: null };
+    if (!data.meta) data.meta = { demo: false, monthlyBudget: 0 };
+    if (!data.goals) data.goals = [];
+    const now = new Date();
+    this.state = {
+      data, view: 'dashboard', mobileNav: false,
+      period: 'mes', from: now.toISOString().slice(0, 8) + '01', to: addM(now.toISOString().slice(0, 10), 3),
+      auth, authForm: {}, authErr: '', authMsg: '', authBusy: false, booting: true, cloud: 'ok', rev: 0,
+      hideValues: !!prefs.hideValues, motion: prefs.motion || 'full', fontSize: prefs.fontSize || 16,
+      month: now.toISOString().slice(0, 7), year: now.getFullYear(),
+      source: 'all', search: '', txType: 'all',
+      modal: null, form: {}, confirm: null, toast: null,
+    };
+    this._charts = {}; this._sig = '';
+  }
+  componentDidMount() {
+    this.applyPrefs(); this.boot();
+    // o layout decide entre celular e computador pela largura: refaz ao girar a tela
+    this._onResize = () => { clearTimeout(this._rz); this._rz = setTimeout(() => this.forceUpdate(), 150); };
+    window.addEventListener('resize', this._onResize);
+  }
+  componentWillUnmount() {
+    clearTimeout(this._push); clearTimeout(this._rz); clearInterval(this._poll);
+    if (this._onFocus) window.removeEventListener('focus', this._onFocus);
+    if (this._onResize) window.removeEventListener('resize', this._onResize);
+  }
+  componentDidUpdate() { this.applyPrefs(); this.syncCharts(); }
+  applyPrefs() {
+    const r = document.documentElement;
+    r.setAttribute('data-motion', this.state.motion === 'reduced' ? 'reduced' : 'full');
+    r.style.setProperty('--fs', this.state.fontSize + 'px');
+    const a = this.props.accent;
+    if (a) { r.style.setProperty('--pink', a); }
+  }
+  save(data, cb) {
+    const D = this.state.data, me = this.me;
+    const full = { ...D, ...data };
+    if (me) ['transactions', 'accounts', 'cards', 'goals'].forEach(k => {
+      const hidden = (D[k] || []).filter(x => !this.mine(x));
+      const shown = (data[k] || []).filter(x => !x._foreign).map(x => x.owner ? x : { ...x, owner: me.id });
+      full[k] = [...shown, ...hidden];
+    });
+    this.setState({ data: full }, () => { this.queuePush(); cb && cb(); });
+  }
+  /* ===== usuários e acesso ===== */
+  get me() { const a = this.state.auth; return a.users.find(u => u.id === a.currentId) || null; }
+  otherUser() { const a = this.state.auth; return a.users.find(u => u.id !== a.currentId) || null; }
+  saveAuth(auth, cb) { this.setState({ auth }, () => { cb && cb(); }); }
+  mine(x) { const me = this.me; if (!me) return true; if (x.split || x.shared) return true; return (x.owner || me.id) === me.id; }
+  paidByMe(t) { const me = this.me; const said = (t.payer || 'eu') === 'eu'; if (!me) return said; return said === ((t.owner || me.id) === me.id); }
+  /* ===== Supabase: sessão, dados e sincronização ===== */
+  async boot() {
+    if (!window.SB) return this.setState({ booting: false, authErr: 'Faltam as chaves do Supabase no arquivo config.js.' });
+    window.SB.auth.onAuthStateChange((evt, s) => {
+      if (evt === 'PASSWORD_RECOVERY') this.setState({ modal: { type: 'pw' }, form: {}, recovery: true });
+    });
+    let session = null;
+    try { session = (await window.SB.auth.getSession()).data.session; } catch (e) {}
+    if (!session) return this.setState({ booting: false });
+    await this.afterLogin(session);
+  }
+  async afterLogin(session) {
+    this.setState({ booting: true, authErr: '', authMsg: '' });
+    const ok = await this.loadCloud(session);
+    this.setState({ booting: false, authForm: {}, authBusy: false });
+    if (ok) { this.setState({ view: 'dashboard' }); this.startPolling(); }
+  }
+  async loadCloud(session) {
+    const myId = session.user.id, myMail = session.user.email || '';
+    const mem = await window.SB.from('membros').select('user_id,nome,email');
+    if (mem.error) { await window.SB.auth.signOut(); return this.setState({ authErr: 'Não consegui ler a lista de usuários: ' + mem.error.message }), false; }
+    const users = (mem.data || []).map(m => ({ id: m.user_id, name: m.nome || (m.email || '').split('@')[0] || 'Você', login: m.email || '' }));
+    if (!users.some(u => u.id === myId)) users.push({ id: myId, name: ((session.user.user_metadata || {}).nome) || myMail.split('@')[0] || 'Você', login: myMail });
+    const row = await window.SB.from('cofre').select('rev,dados').eq('id', 'casa').maybeSingle();
+    if (row.error) { await window.SB.auth.signOut(); return this.setState({ authErr: 'Não consegui abrir seus dados: ' + row.error.message }), false; }
+    let data, rev;
+    if (!row.data) {
+      const ins = await window.SB.from('cofre').insert({ id: 'casa', dados: emptyData(), rev: 1, updated_by: myId }).select('rev,dados').single();
+      if (ins.error) { await window.SB.auth.signOut(); return this.setState({ authErr: 'Não consegui criar seus dados: ' + ins.error.message }), false; }
+      data = ins.data.dados; rev = ins.data.rev;
+    } else { data = row.data.dados; rev = row.data.rev; }
+    this.setState({ data: normalizeDoc(data), rev, cloud: 'ok', auth: { users, currentId: myId } });
+    return true;
+  }
+  queuePush() {
+    clearTimeout(this._push);
+    this.setState({ cloud: 'saving' });
+    this._push = setTimeout(() => { this._push = null; this.pushCloud(); }, 700);
+  }
+  async pushCloud() {
+    const me = this.me; if (!me || !window.SB) return;
+    const snap = this.state.data, rev = this.state.rev;
+    const r = await window.SB.from('cofre')
+      .update({ dados: snap, rev: rev + 1, updated_by: me.id, updated_at: new Date().toISOString() })
+      .eq('id', 'casa').eq('rev', rev).select('rev').maybeSingle();
+    if (r.error) { this.setState({ cloud: 'err' }); return this.toast('Não consegui salvar na nuvem', 'err'); }
+    if (!r.data) return this.mergeRemote(snap);
+    this.setState({ rev: r.data.rev, cloud: 'ok' });
+  }
+  async mergeRemote(mine) {
+    const row = await window.SB.from('cofre').select('rev,dados').eq('id', 'casa').maybeSingle();
+    if (row.error || !row.data) { this.setState({ cloud: 'err' }); return this.toast('Não consegui salvar — recarregue a página', 'err'); }
+    const merged = mergeDocs(normalizeDoc(row.data.dados), mine);
+    const r2 = await window.SB.from('cofre')
+      .update({ dados: merged, rev: row.data.rev + 1, updated_by: this.me.id, updated_at: new Date().toISOString() })
+      .eq('id', 'casa').eq('rev', row.data.rev).select('rev').maybeSingle();
+    if (r2.error || !r2.data) { this.setState({ cloud: 'err' }); return this.toast('Alguém salvou ao mesmo tempo — recarregue a página', 'err'); }
+    this.setState({ data: merged, rev: r2.data.rev, cloud: 'ok' });
+    this.toast('Dados combinados com o outro dispositivo', 'warn');
+  }
+  startPolling() {
+    const tick = async () => {
+      if (!this.me || !window.SB || this._push || document.hidden) return;
+      const r = await window.SB.from('cofre').select('rev,dados,updated_by').eq('id', 'casa').maybeSingle();
+      if (r.error || !r.data || r.data.rev === this.state.rev) return;
+      if (r.data.updated_by === this.me.id) return this.setState({ rev: r.data.rev });
+      this.setState({ data: normalizeDoc(r.data.dados), rev: r.data.rev });
+      const who = (this.state.auth.users.find(u => u.id === r.data.updated_by) || {}).name;
+      this.toast(who ? 'Atualizado por ' + who.split(' ')[0] : 'Dados atualizados');
+    };
+    if (!this._poll) this._poll = setInterval(tick, 15000);
+    if (!this._onFocus) { this._onFocus = () => tick(); window.addEventListener('focus', this._onFocus); }
+  }
+  /* ===== entrar, sair, senha ===== */
+  async doLogin() {
+    const f = this.state.authForm, email = (f.login || '').trim().toLowerCase();
+    if (!email || !f.pass) return this.setState({ authErr: 'Preencha e-mail e senha.' });
+    if (!window.SB) return this.setState({ authErr: 'Faltam as chaves do Supabase no arquivo config.js.' });
+    this.setState({ authBusy: true, authErr: '', authMsg: '' });
+    const { data, error } = await window.SB.auth.signInWithPassword({ email, password: f.pass });
+    if (error) return this.setState({ authBusy: false, authErr: /Invalid login/i.test(error.message) ? 'E-mail ou senha incorretos.' : error.message });
+    await this.afterLogin(data.session);
+  }
+  async sendReset() {
+    const email = (this.state.authForm.login || '').trim().toLowerCase();
+    if (!email) return this.setState({ authErr: 'Escreva seu e-mail primeiro.' });
+    this.setState({ authBusy: true, authErr: '', authMsg: '' });
+    const { error } = await window.SB.auth.resetPasswordForEmail(email, { redirectTo: window.location.href.split('#')[0] });
+    this.setState({ authBusy: false, authErr: error ? error.message : '', authMsg: error ? '' : 'Enviei um link para ' + email + '. Abra o e-mail para criar uma senha nova.' });
+  }
+  async logout() {
+    clearTimeout(this._push);
+    try { await window.SB.auth.signOut(); } catch (e) {}
+    this.setState({ auth: { users: [], currentId: null }, data: emptyData(), rev: 0, cloud: 'ok', authForm: {}, authErr: '', authMsg: '', mobileNav: false, modal: null, view: 'dashboard' });
+  }
+  async changePw() {
+    const f = this.state.form;
+    if ((f.pass || '').length < 8) return this.toast('A senha precisa ter 8 caracteres ou mais', 'err');
+    if (f.pass !== f.pass2) return this.toast('As senhas não são iguais', 'err');
+    const { error } = await window.SB.auth.updateUser({ password: f.pass });
+    if (error) return this.toast(error.message, 'err');
+    this.setState({ modal: null, recovery: false });
+    this.toast('Senha alterada');
+  }
+  delUser(u) {
+    const other = this.state.auth.users.find(x => x.id !== u.id);
+    this.setState({ confirm: { danger: true, msg: `Apagar os lançamentos, cartões e metas que são só de ${u.name}? O que está marcado como dividido fica com quem sobrar. O acesso continua valendo — para tirar o acesso, remova a pessoa no painel do Supabase.`, onYes: () => {
+      const D = this.state.data;
+      const fix = arr => (arr || []).filter(x => x.owner !== u.id || x.split || x.shared).map(x => (x.owner === u.id && other) ? { ...x, owner: other.id } : x);
+      const data = { ...D, transactions: fix(D.transactions), accounts: fix(D.accounts), cards: fix(D.cards), goals: fix(D.goals) };
+      this.setState({ data, confirm: null, modal: null }, () => { this.queuePush(); this.toast('Dados apagados', 'warn'); });
+    } } });
+  }
+  resetAll() {
+    this.setState({ confirm: { danger: true, msg: 'Apagar TODOS os dados da nuvem, inclusive os da outra pessoa? Faça um backup antes — não tem como desfazer. Os acessos continuam valendo.', onYes: () => {
+      this.setState({ data: emptyData(), confirm: null, modal: null }, () => { this.queuePush(); this.toast('Tudo apagado', 'warn'); });
+    } } });
+  }
+  cloudChip() {
+    const map = { saving: ['Salvando…', 'var(--warn)'], ok: ['Salvo na nuvem', 'var(--pos)'], err: ['Falha ao salvar', 'var(--neg)'] };
+    const [txt, col] = map[this.state.cloud] || map.ok;
+    const narrow = typeof window !== 'undefined' && window.innerWidth < 900;
+    return h('span', { title: txt, style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '.72rem', fontWeight: 700, color: col, whiteSpace: 'nowrap' } },
+      h('span', { style: { width: '8px', height: '8px', borderRadius: '50%', background: col, flexShrink: 0 } }), narrow ? '' : txt);
+  }
+  savePrefs(patch) { this.setState(patch, () => { try { localStorage.setItem(PREFS_KEY, JSON.stringify({ hideValues: this.state.hideValues, motion: this.state.motion, fontSize: this.state.fontSize })); } catch (e) {} }); }
+  toast(msg, kind = 'ok') { this.setState({ toast: { msg, kind, id: uid() } }); clearTimeout(this._t); this._t = setTimeout(() => this.setState({ toast: null }), 2600); }
+  m(v) { return this.state.hideValues ? '••••' : v; }
+
+  get d() {
+    const D = this.state.data;
+    if (!this.me) return D;
+    const f = arr => (arr || []).filter(x => this.mine(x));
+    const txs = f(D.transactions);
+    const need = new Set(txs.map(t => t.card).filter(Boolean));
+    const cards = (D.cards || []).filter(c => this.mine(c) || need.has(c.id)).map(c => this.mine(c) ? c : { ...c, _foreign: true });
+    return { ...D, transactions: txs, accounts: f(D.accounts), cards, goals: f(D.goals) };
+  }
+  cat(id) { return this.d.categories.find(c => c.id === id); }
+  catName(id) { const c = this.cat(id); return c ? c.name : 'Sem categoria'; }
+  catColor(id) { const c = this.cat(id); return c ? c.color : 'var(--muted)'; }
+  card(id) { return this.d.cards.find(c => c.id === id); }
+  acc(id) { return this.d.accounts.find(a => a.id === id); }
+  isDone(t) { return t.status === 'pago' || t.status === 'recebido'; }
+  partner() { const o = this.otherUser(); return (o && o.name) || (this.d.meta && this.d.meta.partnerName) || 'Parceiro(a)'; }
+  // divisão de despesas com o parceiro
+  myShare(t) { return t.isFatura ? t.myValue : (t.split ? t.value / 2 : t.value); }
+  credit(t) { return t.isFatura ? (t.creditVal || 0) : (t.split && t.type === 'despesa' && this.paidByMe(t) ? t.value / 2 : 0); }
+  debt(t) { return t.isFatura ? (t.debtVal || 0) : (t.split && t.type === 'despesa' && !this.paidByMe(t) ? t.value / 2 : 0); }
+  settlement(month) {
+    const items = this.monthItems(month);
+    let receber = 0, pagar = 0;
+    items.forEach(i => { receber += this.credit(i); pagar += this.debt(i); });
+    return { receber, pagar, saldo: receber - pagar };
+  }
+
+  /* ===== derivações ===== */
+  balances() {
+    const b = {}; this.d.accounts.forEach(a => b[a.id] = a.balance || 0);
+    this.d.transactions.forEach(t => {
+      if (!t.account || !(t.account in b)) return;
+      if (t.type === 'receita' && t.status === 'recebido') b[t.account] += t.value;
+      if (t.type === 'despesa' && t.status === 'pago') b[t.account] -= t.value;
+    });
+    return b;
+  }
+  totalBalance() { const b = this.balances(); return Object.values(b).reduce((s, v) => s + v, 0); }
+
+  // faturas de cartão agregadas por cartão/mês
+  faturas() {
+    const groups = {};
+    this.d.transactions.filter(t => t.type === 'despesa' && t.card).forEach(t => {
+      const c = this.card(t.card); if (!c) return;
+      const k = t.card + '|' + mk(t.dueDate || t.date);
+      (groups[k] = groups[k] || { card: c, key: mk(t.dueDate || t.date), txs: [] }).txs.push(t);
+    });
+    return Object.values(groups).map(g => {
+      const [y, mo] = g.key.split('-');
+      const dd = Math.min(g.card.dueDay || 10, new Date(+y, +mo, 0).getDate());
+      const due = `${y}-${mo}-${String(dd).padStart(2, '0')}`;
+      const total = g.txs.reduce((a, t) => a + t.value, 0);
+      const mine = g.txs.reduce((a, t) => a + (t.split ? t.value / 2 : t.value), 0);
+      const cred = g.txs.reduce((a, t) => a + (t.split && this.paidByMe(t) ? t.value / 2 : 0), 0);
+      const deb = g.txs.reduce((a, t) => a + (t.split && !this.paidByMe(t) ? t.value / 2 : 0), 0);
+      return { id: 'fat|' + g.card.id + '|' + g.key, isFatura: true, cardRef: g.card, monthKey: g.key, txIds: g.txs.map(t => t.id), count: g.txs.length, type: 'despesa', desc: 'Fatura ' + g.card.name, category: catIdOf(this.d.categories, 'Dívidas'), value: total, myValue: mine, creditVal: cred, debtVal: deb, split: mine !== total, date: due, dueDate: due, status: g.txs.every(t => t.status === 'pago') ? 'pago' : 'pendente', payMethod: 'Cartão' };
+    });
+  }
+  // ocorrências futuras de recorrentes (virtuais), dentro de um mês alvo
+  recFor(monthKeyTarget) {
+    const out = [];
+    const step = { mensal: 1, anual: 12 };
+    this.d.transactions.filter(t => t.recurring && !t.card && !t.recSource).forEach(src => {
+      const anchor = src.dueDate || src.date;
+      if (mk(anchor) >= monthKeyTarget) return;
+      if (src.recurring === 'semanal') {
+        for (let i = 1; i <= 260; i++) {
+          const dt = new Date(anchor + 'T12:00:00'); dt.setDate(dt.getDate() + 7 * i);
+          const iso = dt.toISOString().slice(0, 10);
+          if (mk(iso) > monthKeyTarget) break;
+          if (mk(iso) === monthKeyTarget && !this.recDone(src.id, monthKeyTarget, iso)) out.push(this.recVirt(src, iso));
+        }
+      } else {
+        const s = step[src.recurring] || 1;
+        for (let i = 1; i <= 130; i++) {
+          const iso = addM(anchor, i * s);
+          if (mk(iso) > monthKeyTarget) break;
+          if (mk(iso) === monthKeyTarget && !this.recDone(src.id, monthKeyTarget)) out.push(this.recVirt(src, iso));
+        }
+      }
+    });
+    return out;
+  }
+  recDone(srcId, month, iso) { return this.d.transactions.some(t => t.recSource === srcId && (iso ? (t.dueDate || t.date) === iso : mk(t.dueDate || t.date) === month)); }
+  recVirt(src, iso) { return { ...src, id: 'rec|' + src.id + '|' + iso, isRec: true, recSrcId: src.id, date: iso, dueDate: iso, payDate: '', status: src.type === 'receita' ? 'a receber' : 'pendente' }; }
+
+  // período selecionado no painel
+  monthKeysBetween(a, b) { const out = []; let k = mk(a); const end = mk(b); let g = 0; while (k <= end && g++ < 400) { out.push(k); k = mk(addM(k + '-01', 1)); } return out; }
+  rangeItems(from, to) {
+    const seen = new Set(), out = [];
+    this.monthKeysBetween(from, to).forEach(k => this.monthItems(k).forEach(i => {
+      const dt = i.dueDate || i.date;
+      if (dt < from || dt > to || seen.has(i.id)) return;
+      seen.add(i.id); out.push(i);
+    }));
+    return out.sort((a, b) => (a.dueDate || a.date).localeCompare(b.dueDate || b.date));
+  }
+  periodRange() {
+    const st = this.state;
+    if (st.period === 'ano') return { from: st.year + '-01-01', to: st.year + '-12-31', label: 'Ano de ' + st.year };
+    if (st.period === 'custom') {
+      const from = st.from, to = st.to < st.from ? st.from : st.to;
+      return { from, to, label: isoBR(from) + ' a ' + isoBR(to) };
+    }
+    const [y, m] = st.month.split('-');
+    return { from: st.month + '-01', to: st.month + '-' + String(new Date(+y, +m, 0).getDate()), label: mkLong(st.month) };
+  }
+  // tudo que cai num mês (planejamento mensal)
+  monthItems(month) {
+    const real = this.d.transactions.filter(t => !t.card && mk(t.dueDate || t.date) === month);
+    const fats = this.faturas().filter(f => mk(f.dueDate) === month);
+    const recs = this.recFor(month);
+    return [...real, ...fats, ...recs].sort((a, b) => (a.dueDate || a.date).localeCompare(b.dueDate || b.date));
+  }
+
+  /* ===== ações ===== */
+  openTx(mode, tx) {
+    const base = { desc: '', value: 0, type: 'despesa', category: '', date: todayISO(), dueDate: '', payMethod: 'Pix', card: '', account: this.d.accounts[0] ? this.d.accounts[0].id : '', status: 'pendente', recurring: '', installments: '', installment: '', notes: '', tags: [], subcategory: '', split: false, payer: 'eu', more: false };
+    this.setState({ modal: { type: 'tx', mode }, form: mode === 'edit' && tx ? { ...base, ...tx, tags: tx.tags || [], more: true } : base });
+  }
+  setF(p) { this.setState({ form: { ...this.state.form, ...p } }); }
+  saveTx() {
+    const f = this.state.form;
+    if (!f.desc || !f.desc.trim()) return this.toast('Escreve uma descrição', 'err');
+    if (!f.value || f.value <= 0) return this.toast('Coloca o valor', 'err');
+    if (!f.date) return this.toast('Escolhe a data', 'err');
+    const clean = o => { const c = { ...o }; delete c.more; if (c.payMethod !== 'Cartão') c.card = ''; if (!c.dueDate) c.dueDate = c.date; return c; };
+    const data = { ...this.d, transactions: [...this.d.transactions] };
+    if (this.state.modal.mode === 'edit') {
+      const i = data.transactions.findIndex(t => t.id === f.id);
+      data.transactions[i] = clean(f);
+      this.save(data, () => this.toast('Atualizado'));
+    } else {
+      const n = parseInt(f.installments);
+      if (n > 1 && f.payMethod === 'Cartão' && f.card) {
+        const grp = uid(), per = Math.round((f.value / n) * 100) / 100;
+        for (let i = 1; i <= n; i++) data.transactions.push(clean({ ...f, id: uid(), value: per, date: addM(f.date, i - 1), dueDate: addM(f.dueDate || f.date, i - 1), installment: i, installments: n, installmentGroup: grp, status: i === 1 ? f.status : 'agendado' }));
+        this.save(data, () => this.toast(`${n} parcelas lançadas`));
+      } else {
+        data.transactions.push(clean({ ...f, id: uid() }));
+        this.save(data, () => this.toast('Lançado!'));
+      }
+    }
+    this.setState({ modal: null });
+  }
+  delTx(id) { this.setState({ confirm: { msg: 'Excluir este lançamento?', onYes: () => { this.save({ ...this.d, transactions: this.d.transactions.filter(t => t.id !== id) }, () => this.toast('Excluído', 'warn')); this.setState({ confirm: null }); } } }); }
+  dupTx(t) { this.save({ ...this.d, transactions: [...this.d.transactions, { ...t, id: uid(), desc: t.desc + ' (cópia)', status: 'pendente' }] }, () => this.toast('Duplicado')); }
+
+  toggleDone(item) {
+    if (item.isFatura) {
+      if (item.status === 'pago') { this.save({ ...this.d, transactions: this.d.transactions.map(x => item.txIds.includes(x.id) ? { ...x, status: 'pendente', payDate: '' } : x) }, () => this.toast('Fatura reaberta', 'warn')); }
+      else this.setState({ modal: { type: 'pay', payload: item }, form: { account: item.cardRef.payAccount || (this.d.accounts[0] || {}).id } });
+      return;
+    }
+    if (item.isRec) { this.setState({ modal: { type: 'pay', payload: item }, form: { account: item.account || (this.d.accounts[0] || {}).id } }); return; }
+    if (this.isDone(item)) { this.save({ ...this.d, transactions: this.d.transactions.map(x => x.id === item.id ? { ...x, status: 'pendente', payDate: '' } : x) }, () => this.toast('Reaberto', 'warn')); return; }
+    this.setState({ modal: { type: 'pay', payload: item }, form: { account: item.account || (this.d.accounts[0] || {}).id } });
+  }
+  confirmPay() {
+    const it = this.state.modal.payload, accId = this.state.form.account;
+    let data;
+    if (it.isFatura) data = { ...this.d, transactions: this.d.transactions.map(x => it.txIds.includes(x.id) ? { ...x, status: 'pago', account: accId, payDate: todayISO() } : x) };
+    else if (it.isRec) { const real = { ...it, id: uid(), recSource: it.recSrcId, recurring: '', status: it.type === 'receita' ? 'recebido' : 'pago', account: accId, payDate: todayISO() }; delete real.isRec; delete real.recSrcId; data = { ...this.d, transactions: [...this.d.transactions, real] }; }
+    else data = { ...this.d, transactions: this.d.transactions.map(x => x.id === it.id ? { ...x, status: it.type === 'receita' ? 'recebido' : 'pago', account: accId, payDate: todayISO() } : x) };
+    this.save(data, () => this.toast(it.type === 'receita' ? 'Recebido!' : 'Pago!'));
+    this.setState({ modal: null });
+  }
+
+  /* ===== estilos ===== */
+  glass(x = {}) { return { background: 'var(--card)', border: '1px solid var(--stroke)', borderRadius: 'var(--r)', boxShadow: 'var(--shadow)', ...x }; }
+  btn(k = 'primary', x = {}) {
+    const b = { display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '10px 16px', borderRadius: '10px', border: '1px solid transparent', cursor: 'pointer', fontWeight: 700, fontSize: '.9rem', whiteSpace: 'nowrap', transition: 'transform .15s,background .2s,box-shadow .2s', fontFamily: 'inherit' };
+    if (k === 'primary') return { ...b, background: 'var(--pink)', color: '#fff', ...x };
+    if (k === 'ghost') return { ...b, background: 'var(--card-2)', color: 'var(--ink)', border: '1px solid var(--stroke)', ...x };
+    if (k === 'soft') return { ...b, background: 'var(--pink-soft)', color: 'var(--pink-deep)', ...x };
+    return { ...b, ...x };
+  }
+  // adesivo decorativo (não interativo)
+  stkSrc(name) { return (typeof window !== 'undefined' && window.__STICKERS && window.__STICKERS[name]) || 'stickers/' + name + '.png'; }
+  stk(name, st = {}) { return h('img', { key: 'stk' + name, src: this.stkSrc(name), alt: '', 'aria-hidden': 'true', draggable: false, style: { position: 'absolute', pointerEvents: 'none', userSelect: 'none', filter: 'drop-shadow(0 4px 10px rgba(60,66,76,.2))', ...st } }); }
+  ico(d, s = 20, x = {}) { return h('svg', { width: s, height: s, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round', style: x }, h('path', { d })); }
+  inp(x = {}) { return { padding: '10px 13px', borderRadius: '10px', border: '1px solid var(--stroke)', background: 'var(--card-2)', color: 'var(--ink)', outline: 'none', width: '100%', ...x }; }
+  disp(x = {}) { return { fontFamily: 'inherit', fontWeight: 700, letterSpacing: '-.018em', ...x }; }
+
+  /* ===== render ===== */
+  render() { return h('div', { id: 'groovy-root' }, this.renderApp()); }
+  renderApp() {
+    if (this.state.booting) return this.renderBoot();
+    if (!this.me) return this.renderAuth();
+    const narrow = typeof window !== 'undefined' && window.innerWidth < 900;
+    return h('div', { style: { display: 'flex', minHeight: '100vh' } },
+      this.renderNav(narrow),
+      h('div', { style: { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' } },
+        this.renderTop(narrow),
+        h('main', { key: this.state.view, style: { flex: 1, padding: 'clamp(14px,2.6vw,30px)', animation: 'rise .3s both' } }, this.renderView())),
+      narrow && this.state.mobileNav && h('div', { onClick: () => this.setState({ mobileNav: false }), style: { position: 'fixed', inset: 0, background: 'rgba(70,30,50,.32)', zIndex: 40 } }),
+      this.renderModal(), this.renderConfirm(), this.renderToast());
+  }
+  renderBoot() {
+    return h('div', { style: { minHeight: '100vh', display: 'grid', placeItems: 'center', gap: '14px' } },
+      h('div', { style: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '14px' } },
+        h('div', { style: { width: '38px', height: '38px', borderRadius: '50%', border: '3px solid var(--stroke)', borderTopColor: 'var(--pink)', animation: 'spin .8s linear infinite' } }),
+        h('div', { style: { fontSize: '.85rem', color: 'var(--muted)', fontWeight: 600 } }, 'Carregando seus dados…')));
+  }
+  renderAuth() {
+    const f = this.state.authForm, busy = this.state.authBusy;
+    const set = p => this.setState({ authForm: { ...this.state.authForm, ...p }, authErr: '', authMsg: '' });
+    const go = () => { if (!busy) this.doLogin(); };
+    const inp = (label, key, type, auto) => h('label', { key: key, style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+      h('span', { style: { fontSize: '.78rem', fontWeight: 700, color: 'var(--muted)' } }, label),
+      h('input', { type: type || 'text', value: f[key] || '', autoComplete: auto || 'off', onChange: e => set({ [key]: e.target.value }), onKeyDown: e => { if (e.key === 'Enter') go(); }, style: this.inp() }));
+    return h('div', { style: { minHeight: '100vh', display: 'grid', placeItems: 'center', padding: 'clamp(18px,4vw,40px)' } },
+      h('div', { style: this.glass({ width: 'min(420px,100%)', padding: 'clamp(22px,4vw,34px)', display: 'flex', flexDirection: 'column', gap: '15px' }) },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px' } },
+          h('div', { style: { width: '44px', height: '44px', borderRadius: '15px', background: 'linear-gradient(135deg,var(--pink),var(--coral))', display: 'grid', placeItems: 'center', color: '#fff', flexShrink: 0, boxShadow: '0 8px 18px rgba(70,76,86,.28)' } },
+            h('svg', { width: 24, height: 24, viewBox: '0 0 24 24', fill: 'currentColor' }, h('path', { d: 'M4 20h3.4V11H4v9zm6.3 0h3.4V4h-3.4v16zm6.3 0H20v-6.5h-3.4V20z' }))),
+          h('div', null,
+            h('div', { style: this.disp({ fontSize: '1.4rem' }) }, 'Finanças pessoais'),
+            h('div', { style: { fontSize: '.8rem', color: 'var(--muted)', fontWeight: 500 } }, 'entre para ver seus dados'))),
+        inp('E-mail', 'login', 'email', 'username'),
+        inp('Senha', 'pass', 'password', 'current-password'),
+        this.state.authErr && h('div', { style: { padding: '11px 14px', borderRadius: '14px', background: 'rgba(222,108,99,.14)', color: 'var(--neg)', fontSize: '.83rem', fontWeight: 600 } }, this.state.authErr),
+        this.state.authMsg && h('div', { style: { padding: '11px 14px', borderRadius: '14px', background: 'rgba(62,156,126,.14)', color: 'var(--pos)', fontSize: '.83rem', fontWeight: 600 } }, this.state.authMsg),
+        h('button', { onClick: go, disabled: busy, style: this.btn('primary', { justifyContent: 'center', padding: '13px', opacity: busy ? .6 : 1 }) }, busy ? 'Entrando…' : 'Entrar'),
+        h('button', { onClick: () => this.sendReset(), disabled: busy, style: this.btn('ghost', { justifyContent: 'center' }) }, 'Esqueci minha senha'),
+        h('p', { style: { fontSize: '.72rem', color: 'var(--muted)', lineHeight: 1.55, textWrap: 'pretty' } }, 'Seus dados ficam na sua conta do Supabase, protegidos por senha, e aparecem em qualquer aparelho onde você entrar. Cada pessoa vê apenas os próprios lançamentos; o que for marcado como dividido aparece para as duas.')));
+  }
+  renderNav(narrow) {
+    const open = this.state.mobileNav;
+    return h('aside', { style: { width: '250px', flexShrink: 0, padding: '24px 16px', display: 'flex', flexDirection: 'column', gap: '6px', background: '#fff', borderRight: '1px solid var(--stroke)', position: narrow ? 'fixed' : 'sticky', top: 0, height: '100vh', left: narrow ? (open ? 0 : '-270px') : 0, transition: 'left .28s', zIndex: 45 } },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '11px', padding: '2px 10px 20px', flexShrink: 0 } },
+        h('div', { style: { width: '38px', height: '38px', borderRadius: '10px', background: 'var(--pink-deep)', display: 'grid', placeItems: 'center', color: '#fff', flexShrink: 0 } },
+          h('svg', { width: 22, height: 22, viewBox: '0 0 24 24', fill: 'currentColor' }, h('path', { d: 'M4 20h3.4V11H4v9zm6.3 0h3.4V4h-3.4v16zm6.3 0H20v-6.5h-3.4V20z' }))),
+        h('div', { style: { minWidth: 0 } }, h('div', { style: this.disp({ fontSize: '1.06rem', lineHeight: 1.1 }) }, 'Finanças pessoais'), h('div', { style: { fontSize: '.72rem', color: 'var(--muted)', fontWeight: 500, lineHeight: 1.25 } }, 'controle do mês, do ano e das metas'))),
+      ...NAV.map(([id, label, path]) => {
+        const on = this.state.view === id;
+        return h('button', { key: id, onClick: () => this.setState({ view: id, mobileNav: false }), style: { display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 13px', borderRadius: '10px', border: 'none', cursor: 'pointer', width: '100%', textAlign: 'left', flexShrink: 0, background: on ? 'var(--pink-soft)' : 'transparent', color: on ? 'var(--pink-deep)' : 'var(--muted)', fontWeight: on ? 600 : 500, fontSize: '.875rem', boxShadow: 'none', transition: 'background .2s' } }, this.ico(path, 19), h('span', null, label));
+      }),
+      h('div', { style: { flex: 1 } }),
+      h('div', { style: { padding: '13px 15px', borderRadius: '10px', background: 'var(--pink-soft)', flexShrink: 0, position: 'relative' } },
+        h('div', { style: { fontSize: '.72rem', color: 'var(--muted)', fontWeight: 600 } }, 'Saldo em conta'),
+        h('div', { style: this.disp({ fontSize: '1.2rem', color: 'var(--pos)' }) }, this.m(fmt(this.totalBalance())))));
+  }
+  renderTop(narrow) {
+    return h('header', { style: { position: 'sticky', top: 0, zIndex: 30, display: 'flex', alignItems: 'center', gap: '10px', padding: 'clamp(12px,2vw,18px) clamp(14px,2.6vw,30px)', background: '#fff', borderBottom: '1px solid var(--stroke)' } },
+      narrow && h('button', { onClick: () => this.setState({ mobileNav: true }), style: this.btn('ghost', { padding: '10px' }) }, this.ico('M3 6h18M3 12h18M3 18h18', 20)),
+      h('div', { style: { minWidth: 0 } },
+        h('h1', { style: this.disp({ fontSize: 'clamp(1.05rem,2vw,1.3rem)', lineHeight: 1.2 }) }, (NAV.find(n => n[0] === this.state.view) || [])[1]),
+        !narrow && h('p', { style: { fontSize: '.8rem', color: 'var(--muted)', marginTop: '2px' } }, SUBS[this.state.view] || '')),
+      h('div', { style: { flex: 1 } }),
+      this.cloudChip(),
+      h('button', { title: 'Sair da conta de ' + this.me.name, onClick: () => this.logout(), style: this.btn('ghost', { padding: '6px 12px 6px 6px', gap: '8px' }) },
+        h('span', { style: { width: '27px', height: '27px', borderRadius: '50%', background: 'var(--pink)', color: '#fff', display: 'grid', placeItems: 'center', fontSize: '.78rem', fontWeight: 700, flexShrink: 0 } }, (this.me.name || '?').slice(0, 1).toUpperCase()),
+        narrow ? '' : this.me.name.split(' ')[0],
+        this.ico('M15 12H3m0 0l4-4m-4 4l4 4M13 4h5a2 2 0 012 2v12a2 2 0 01-2 2h-5', 16)),
+      h('button', { title: this.state.hideValues ? 'Mostrar valores' : 'Esconder valores', onClick: () => this.savePrefs({ hideValues: !this.state.hideValues }), style: this.btn('ghost', { padding: '10px' }) },
+        this.ico(this.state.hideValues ? 'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12zM12 9a3 3 0 100 6 3 3 0 000-6z' : 'M3 3l18 18M10.6 10.6a3 3 0 004 4M9.9 5.1A9.4 9.4 0 0112 5c6.5 0 10 7 10 7a17 17 0 01-3 3.8M6.6 6.6A17 17 0 002 12s3.5 7 10 7c1 0 2-.1 2.9-.4', 19)),
+      h('button', { onClick: () => this.openTx('add'), style: this.btn('primary') }, this.ico('M12 5v14M5 12h14', 18), narrow ? '' : 'Novo lançamento'));
+  }
+  renderView() {
+    switch (this.state.view) {
+      case 'dashboard': return this.viewDashboard();
+      case 'lancamentos': return this.viewLancamentos();
+      case 'mensal': return this.viewMensal();
+      case 'anual': return this.viewAnual();
+      case 'metas': return this.viewMetas();
+      case 'config': return this.viewConfig();
+    }
+  }
+  head(t, sub) { return h('div', { style: { marginBottom: '14px' } }, h('h2', { style: this.disp({ fontSize: '1.12rem' }) }, t), sub && h('p', { style: { color: 'var(--muted)', fontSize: '.84rem', marginTop: '2px' } }, sub)); }
+  empty(t, msg, action, sticker) {
+    return h('div', { style: this.glass({ padding: '52px 26px', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }) },
+      h('div', { style: { width: '58px', height: '58px', borderRadius: '20px', background: 'var(--pink-soft)', color: 'var(--pink-deep)', display: 'grid', placeItems: 'center', marginBottom: '6px' } }, this.ico('M4 13h6V4H4v9zm0 7h6v-5H4v5zm10 0h6V11h-6v9zm0-16v5h6V4h-6z', 26)),
+      h('h3', { style: this.disp({ fontSize: '1.05rem' }) }, t),
+      h('p', { style: { color: 'var(--muted)', fontSize: '.88rem', maxWidth: '380px' } }, msg), action);
+  }
+  chip(label, on, onClick, color) {
+    return h('button', { key: label, onClick, style: { padding: '7px 13px', borderRadius: '9px', border: on ? 'none' : '1px solid var(--stroke)', background: on ? (color || 'var(--pink)') : 'var(--card-2)', color: on ? '#fff' : 'var(--ink)', fontWeight: on ? 700 : 500, fontSize: '.83rem', cursor: 'pointer', transition: 'background .18s' } }, label);
+  }
+
+  /* ---------- 0. PAINEL ---------- */
+  viewDashboard() {
+    const st = this.state, { from, to, label } = this.periodRange();
+    const items = this.rangeItems(from, to);
+    const today = todayISO();
+    const sai = items.filter(i => i.type === 'despesa'), ent = items.filter(i => i.type === 'receita');
+    const val = i => this.myShare(i);
+    const totSai = sai.reduce((a, i) => a + val(i), 0);
+    const pago = sai.filter(i => this.isDone(i)).reduce((a, i) => a + val(i), 0);
+    const abertas = sai.filter(i => !this.isDone(i));
+    const falta = abertas.reduce((a, i) => a + val(i), 0);
+    const venc = abertas.filter(i => (i.dueDate || i.date) < today);
+    const vencVal = venc.reduce((a, i) => a + val(i), 0);
+    const totEnt = ent.reduce((a, i) => a + val(i), 0);
+    const pct = totSai > 0 ? (pago / totSai) * 100 : 0;
+    const acerto = { receber: 0, pagar: 0 };
+    items.forEach(i => { acerto.receber += this.credit(i); acerto.pagar += this.debt(i); });
+
+    // por categoria (só o que falta pagar)
+    const byCat = {};
+    abertas.forEach(i => { const k = i.category || 'sem'; byCat[k] = (byCat[k] || 0) + val(i); });
+    const cats = Object.entries(byCat).map(([id, v]) => ({ id, v, name: id === 'sem' ? 'Sem categoria' : this.catName(id), color: id === 'sem' ? 'var(--muted)' : this.catColor(id) })).sort((a, b) => b.v - a.v);
+    const maxCat = cats.length ? cats[0].v : 1;
+
+    const seg = (id, txt) => h('button', { key: id, onClick: () => this.setState({ period: id }), style: { padding: '9px 16px', borderRadius: '999px', border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '.84rem', background: st.period === id ? 'var(--pink)' : 'transparent', color: st.period === id ? '#fff' : 'var(--muted)' } }, txt);
+    const stepBtn = (txt, fn) => h('button', { onClick: fn, style: this.btn('ghost', { padding: '8px 13px' }) }, txt);
+    const shiftM = n => { const [y, m] = st.month.split('-'); this.setState({ month: new Date(+y, +m - 1 + n, 1).toISOString().slice(0, 7) }); };
+
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+      // seletor de período
+      h('div', { style: this.glass({ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: '13px' }) },
+        h('div', { style: { display: 'flex', gap: '6px', padding: '4px', borderRadius: '999px', background: 'var(--pink-soft)', alignSelf: 'flex-start', flexWrap: 'wrap' } },
+          seg('mes', 'Mês'), seg('ano', 'Ano'), seg('custom', 'Período')),
+        st.period === 'mes' && h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' } },
+          stepBtn('◀', () => shiftM(-1)),
+          h('span', { style: this.disp({ fontSize: '1.05rem', minWidth: '190px', textAlign: 'center' }) }, mkLong(st.month)),
+          stepBtn('▶', () => shiftM(1)),
+          h('button', { onClick: () => this.setState({ month: todayISO().slice(0, 7) }), style: this.btn('soft', { fontSize: '.8rem' }) }, 'Mês atual')),
+        st.period === 'ano' && h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' } },
+          stepBtn('◀', () => this.setState({ year: st.year - 1 })),
+          h('span', { style: this.disp({ fontSize: '1.05rem', minWidth: '110px', textAlign: 'center' }) }, String(st.year)),
+          stepBtn('▶', () => this.setState({ year: st.year + 1 }))),
+        st.period === 'custom' && h('div', { style: { display: 'flex', alignItems: 'flex-end', gap: '12px', flexWrap: 'wrap' } },
+          this.field('De', h('input', { type: 'date', value: st.from, onChange: e => this.setState({ from: e.target.value }), style: this.inp() })),
+          this.field('Até', h('input', { type: 'date', value: st.to, onChange: e => this.setState({ to: e.target.value }), style: this.inp() })),
+          h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap' } },
+            this.chip('Próximos 30 dias', false, () => this.setState({ from: today, to: addM(today, 1) })),
+            this.chip('Próximos 3 meses', false, () => this.setState({ from: today, to: addM(today, 3) })),
+            this.chip('Ano até hoje', false, () => this.setState({ from: today.slice(0, 4) + '-01-01', to: today }))))),
+      // destaque: quanto falta pagar
+      h('div', { style: this.glass({ padding: 'clamp(20px,3vw,28px)', display: 'flex', flexWrap: 'wrap', gap: '22px', alignItems: 'center' }) },
+        h('div', { style: { flex: '1 1 240px', minWidth: 0 } },
+          h('div', { style: { fontSize: '.78rem', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.06em' } }, 'A pagar — ' + label),
+          h('div', { style: this.disp({ fontSize: 'clamp(2rem,5vw,2.9rem)', color: falta > 0 ? 'var(--neg)' : 'var(--pos)', lineHeight: 1.05, marginTop: '4px' }) }, this.m(fmt(falta))),
+          h('div', { style: { fontSize: '.85rem', color: 'var(--muted)', marginTop: '6px' } }, abertas.length + (abertas.length === 1 ? ' conta em aberto' : ' contas em aberto') + ' de ' + sai.length),
+          venc.length > 0 && h('div', { style: { marginTop: '12px', display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '8px 14px', borderRadius: '999px', background: 'var(--neg-bg)', color: 'var(--neg)', fontWeight: 700, fontSize: '.83rem' } }, venc.length + ' vencida' + (venc.length > 1 ? 's' : '') + ' • ' + this.m(fmt(vencVal)))),
+        h('div', { style: { flex: '1 1 240px', minWidth: 0 } },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '.8rem', fontWeight: 700, marginBottom: '7px' } },
+            h('span', null, 'Já pago no período'), h('span', { style: { color: 'var(--pos)' } }, this.m(fmt(pago)))),
+          h('div', { style: { height: '12px', borderRadius: '999px', background: 'var(--pink-soft)', overflow: 'hidden' } },
+            h('div', { style: { width: Math.min(100, pct) + '%', height: '100%', borderRadius: '999px', background: 'var(--pos)', transition: 'width .4s' } })),
+          h('div', { style: { fontSize: '.78rem', color: 'var(--muted)', marginTop: '7px' } }, Math.round(pct) + '% das saídas previstas de ' + this.m(fmt(totSai))))),
+      // números do período
+      h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(160px,1fr))', gap: '12px' } },
+        this.stat('Entradas', totEnt, 'var(--pos)'),
+        this.stat('Saídas', totSai, 'var(--neg)'),
+        this.stat('Resultado', totEnt - totSai, totEnt - totSai >= 0 ? 'var(--pos)' : 'var(--neg)'),
+        this.stat('Acerto com ' + this.partner(), acerto.receber - acerto.pagar, acerto.receber - acerto.pagar >= 0 ? 'var(--pos)' : 'var(--neg)')),
+      // categorias + próximas contas
+      h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(300px,1fr))', gap: '16px', alignItems: 'start' } },
+        h('div', { style: this.glass({ padding: '20px 22px' }) }, this.head('Falta pagar por categoria', label),
+          cats.length === 0 ? h('p', { style: { color: 'var(--muted)', fontSize: '.87rem' } }, 'Nada em aberto neste período.')
+            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '11px' } }, ...cats.slice(0, 8).map(c => h('div', { key: c.id },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '.83rem', fontWeight: 600, marginBottom: '5px' } },
+                h('span', null, c.name), h('span', { style: { fontWeight: 700 } }, this.m(fmt(c.v)))),
+              h('div', { style: { height: '9px', borderRadius: '999px', background: 'var(--pink-soft)', overflow: 'hidden' } },
+                h('div', { style: { width: (c.v / maxCat) * 100 + '%', height: '100%', background: c.color, borderRadius: '999px' } })))))),
+        h('div', { style: this.glass({ padding: '20px 22px' }) }, this.head('Próximas a vencer', abertas.length + ' em aberto'),
+          abertas.length === 0 ? h('p', { style: { color: 'var(--muted)', fontSize: '.87rem' } }, 'Tudo pago por aqui.')
+            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px' } }, ...abertas.slice(0, 9).map(i => {
+              const late = (i.dueDate || i.date) < today;
+              return h('button', { key: i.id, onClick: () => this.setState({ view: 'mensal', month: mk(i.dueDate || i.date) }), style: { display: 'flex', alignItems: 'center', gap: '11px', padding: '9px 10px', borderRadius: '14px', border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left', color: 'var(--ink)', width: '100%' } },
+                h('span', { style: { width: '42px', flexShrink: 0, fontSize: '.74rem', fontWeight: 700, color: late ? 'var(--neg)' : 'var(--muted)' } }, isoBR(i.dueDate || i.date).slice(0, 5)),
+                h('span', { style: { flex: 1, minWidth: 0, fontSize: '.85rem', fontWeight: 600, textWrap: 'pretty' } }, i.desc,
+                  i.isRec && h('span', { style: { color: 'var(--muted)', fontWeight: 400 } }, '  ↻'),
+                  i.split && h('span', { style: { color: 'var(--plum)', fontSize: '.72rem', fontWeight: 700 } }, '  ÷')),
+                h('span', { style: { fontWeight: 700, fontSize: '.85rem', color: late ? 'var(--neg)' : 'var(--ink)' } }, this.m(fmt(val(i)))));
+            }), abertas.length > 9 && h('button', { onClick: () => this.setState({ view: 'mensal' }), style: this.btn('soft', { marginTop: '10px', fontSize: '.82rem', alignSelf: 'flex-start' }) }, 'Ver todas no planejamento')))));
+  }
+  /* ---------- 1. LANÇAMENTOS ---------- */
+  viewLancamentos() {
+    const s = this.state;
+    let tx = this.d.transactions.slice();
+    if (s.source === 'pix') tx = tx.filter(t => t.payMethod === 'Pix');
+    else if (s.source === 'rec') tx = tx.filter(t => t.recurring);
+    else if (s.source && s.source.startsWith('card:')) tx = tx.filter(t => t.card === s.source.slice(5));
+    else if (s.source === 'outros') tx = tx.filter(t => !t.card && t.payMethod !== 'Pix' && !t.recurring);
+    if (s.txType !== 'all') tx = tx.filter(t => t.type === s.txType);
+    if (s.search.trim()) { const q = s.search.toLowerCase(); tx = tx.filter(t => (t.desc || '').toLowerCase().includes(q) || this.catName(t.category).toLowerCase().includes(q) || (t.notes || '').toLowerCase().includes(q) || (t.tags || []).join(' ').toLowerCase().includes(q)); }
+    tx.sort((a, b) => (b.dueDate || b.date).localeCompare(a.dueDate || a.date));
+    const ent = tx.filter(t => t.type === 'receita').reduce((a, t) => a + t.value, 0);
+    const sai = tx.filter(t => t.type === 'despesa').reduce((a, t) => a + t.value, 0);
+    const activeCard = s.source.startsWith('card:') ? this.card(s.source.slice(5)) : null;
+
+    const sources = [['all', 'Tudo'], ['pix', 'Pix'], ['rec', 'Recorrentes'], ...this.d.cards.map(c => ['card:' + c.id, c.name]), ['outros', 'Outros']];
+    let lastMonth = '';
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+      // atalhos rápidos
+      h('div', { style: this.glass({ padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: '14px', position: 'relative' }) },
+        h('div', { style: { display: 'flex', gap: '9px', flexWrap: 'wrap', alignItems: 'center' } },
+          h('span', { style: { fontSize: '.78rem', fontWeight: 700, color: 'var(--muted)', marginRight: '2px' } }, 'Lançar rápido:'),
+          h('button', { onClick: () => { this.openTx('add'); setTimeout(() => this.setF({ type: 'despesa', payMethod: 'Pix' }), 0); }, style: this.btn('soft', { padding: '8px 14px', fontSize: '.83rem' }) }, 'Saída no Pix'),
+          h('button', { onClick: () => { this.openTx('add'); setTimeout(() => this.setF({ type: 'receita', payMethod: 'Pix', status: 'recebido' }), 0); }, style: this.btn('soft', { padding: '8px 14px', fontSize: '.83rem', background: 'var(--pos-bg)', color: 'var(--pos)' }) }, 'Entrada'),
+          ...this.d.cards.map(c => h('button', { key: c.id, onClick: () => { this.openTx('add'); setTimeout(() => this.setF({ type: 'despesa', payMethod: 'Cartão', card: c.id }), 0); }, style: this.btn('ghost', { padding: '8px 14px', fontSize: '.83rem', borderColor: c.color, color: c.color }) }, c.name)),
+          h('button', { onClick: () => { this.openTx('add'); setTimeout(() => this.setF({ type: 'despesa', recurring: 'mensal', more: true }), 0); }, style: this.btn('ghost', { padding: '8px 14px', fontSize: '.83rem' }) }, '↻ Recorrente')),
+        h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap' } },
+          h('div', { style: { position: 'relative', flex: '1 1 220px' } },
+            h('span', { style: { position: 'absolute', left: '14px', top: '50%', transform: 'translateY(-50%)', color: 'var(--muted)' } }, this.ico('M11 4a7 7 0 105 12 7 7 0 00-5-12zM21 21l-4-4', 17)),
+            h('input', { value: s.search, onChange: e => this.setState({ search: e.target.value }), placeholder: 'Procurar lançamento…', style: this.inp({ paddingLeft: '40px' }) })),
+          h('select', { value: s.txType, onChange: e => this.setState({ txType: e.target.value }), style: this.inp({ width: 'auto' }) }, h('option', { value: 'all' }, 'Entradas e saídas'), h('option', { value: 'receita' }, 'Só entradas'), h('option', { value: 'despesa' }, 'Só saídas')))),
+      // filtros por origem
+      h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } }, ...sources.map(([v, l]) => this.chip(l, s.source === v, () => this.setState({ source: v }), v.startsWith('card:') ? (this.card(v.slice(5)) || {}).color : null))),
+      // resumo do cartão selecionado
+      activeCard && this.cardStrip(activeCard),
+      // totais
+      h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
+        h('div', { style: this.glass({ padding: '14px 18px', flex: '1 1 160px' }) }, h('div', { style: { fontSize: '.75rem', color: 'var(--muted)', fontWeight: 600 } }, 'Entradas'), h('div', { style: this.disp({ fontSize: '1.15rem', color: 'var(--pos)' }) }, this.m(fmt(ent)))),
+        h('div', { style: this.glass({ padding: '14px 18px', flex: '1 1 160px' }) }, h('div', { style: { fontSize: '.75rem', color: 'var(--muted)', fontWeight: 600 } }, 'Saídas'), h('div', { style: this.disp({ fontSize: '1.15rem', color: 'var(--neg)' }) }, this.m(fmt(sai)))),
+        h('div', { style: this.glass({ padding: '14px 18px', flex: '1 1 160px' }) }, h('div', { style: { fontSize: '.75rem', color: 'var(--muted)', fontWeight: 600 } }, `${tx.length} lançamento(s)`), h('div', { style: this.disp({ fontSize: '1.15rem', color: ent - sai >= 0 ? 'var(--pos)' : 'var(--neg)' }) }, this.m(fmt(ent - sai))))),
+      tx.length === 0 ? this.empty('Nada por aqui ainda', 'Use os atalhos acima para lançar sua primeira movimentação — leva uns 5 segundos.', h('button', { onClick: () => this.openTx('add'), style: this.btn('primary') }, 'Lançar agora'), 'lollipop')
+        : h('div', { style: this.glass({ padding: '10px' }) }, ...tx.map(t => {
+          const mkey = mk(t.dueDate || t.date); let sep = null;
+          if (mkey !== lastMonth) { lastMonth = mkey; sep = h('div', { key: 'h' + mkey, style: { padding: '12px 14px 6px', fontSize: '.75rem', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.06em' } }, mkLong(mkey)); }
+          return [sep, this.txRow(t)];
+        })));
+  }
+  cardStrip(c) {
+    const usado = this.d.transactions.filter(t => t.card === c.id && t.status !== 'pago').reduce((a, t) => a + t.value, 0);
+    const p = c.limit > 0 ? (usado / c.limit) * 100 : 0;
+    return h('div', { style: this.glass({ padding: '18px 20px', display: 'flex', gap: '18px', flexWrap: 'wrap', alignItems: 'center', borderLeft: `4px solid ${c.color}` }) },
+      h('div', { style: { flex: '1 1 200px' } },
+        h('div', { style: this.disp({ fontSize: '1.02rem' }) }, c.name, h('span', { style: { fontWeight: 400, color: 'var(--muted)', fontSize: '.8rem' } }, '  ' + (c.brand || ''))),
+        h('div', { style: { fontSize: '.78rem', color: 'var(--muted)' } }, `Fecha dia ${c.closeDay} • vence dia ${c.dueDay}`),
+        h('div', { style: { height: '8px', borderRadius: '999px', background: 'rgba(70,76,86,.13)', marginTop: '8px', overflow: 'hidden' } }, h('div', { style: { width: Math.min(100, p) + '%', height: '100%', background: p > 85 ? 'var(--neg)' : c.color } })),
+        h('div', { style: { fontSize: '.76rem', color: 'var(--muted)', marginTop: '5px' } }, `${this.m(fmt(usado))} em aberto de ${this.m(fmt(c.limit))} • ${pct(p)}`)),
+      h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+        h('button', { onClick: () => this.openImport(c), style: this.btn('ghost', { fontSize: '.83rem' }) }, this.ico('M12 3v12m0 0l-4-4m4 4l4-4M5 21h14', 15), 'Importar fatura'),
+        h('button', { onClick: () => { this.openTx('add'); setTimeout(() => this.setF({ type: 'despesa', payMethod: 'Cartão', card: c.id }), 0); }, style: this.btn('primary', { fontSize: '.83rem' }) }, this.ico('M12 5v14M5 12h14', 15), 'Lançar')));
+  }
+  txRow(t) {
+    const rec = t.type === 'receita';
+    const tagStyle = { fontSize: '.68rem', fontWeight: 700, padding: '2px 8px', borderRadius: '999px' };
+    return h('div', { key: t.id, style: { display: 'flex', alignItems: 'center', gap: '12px', padding: '11px 14px', borderRadius: '18px', flexWrap: 'wrap' } },
+      h('div', { style: { width: '38px', height: '38px', borderRadius: '13px', flexShrink: 0, background: this.catColor(t.category) + '26', color: this.catColor(t.category), display: 'grid', placeItems: 'center' } }, this.ico(rec ? 'M12 19V5m0 0l-6 6m6-6l6 6' : 'M12 5v14m0 0l6-6m-6 6l-6-6', 18)),
+      h('div', { style: { flex: '1 1 160px', minWidth: 0 } },
+        h('div', { style: { fontWeight: 700, fontSize: '.92rem' } }, t.desc, t.installments > 1 && h('span', { style: { fontWeight: 400, color: 'var(--muted)', fontSize: '.76rem' } }, `  ${t.installment}/${t.installments}`)),
+        h('div', { style: { display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center', marginTop: '3px' } },
+          h('span', { style: { fontSize: '.74rem', color: 'var(--muted)' } }, isoBR(t.dueDate || t.date)),
+          h('span', { style: { ...tagStyle, background: this.catColor(t.category) + '22', color: this.catColor(t.category) } }, this.catName(t.category)),
+          t.card ? h('span', { style: { ...tagStyle, background: (this.card(t.card) || {}).color + '22', color: (this.card(t.card) || {}).color } }, (this.card(t.card) || {}).name)
+            : h('span', { style: { ...tagStyle, background: 'rgba(70,76,86,.1)', color: 'var(--muted)' } }, t.payMethod || '—'),
+          t.recurring && h('span', { style: { ...tagStyle, background: 'var(--pink-soft)', color: 'var(--pink-deep)' } }, '↻ ' + t.recurring),
+          this.isDone(t) && h('span', { style: { ...tagStyle, background: 'var(--pos-bg)', color: 'var(--pos)' } }, rec ? 'recebido' : 'pago'))),
+      this.valueCell(t, rec, false),
+      h('div', { style: { display: 'flex', gap: '2px' } },
+        h('button', { title: 'Editar', onClick: () => this.openTx('edit', t), style: this.iconBtn() }, this.ico('M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', 16)),
+        h('button', { title: 'Duplicar', onClick: () => this.dupTx(t), style: this.iconBtn() }, this.ico('M8 8h12v12H8zM4 16V4h12', 16)),
+        h('button', { title: 'Excluir', onClick: () => this.delTx(t.id), style: this.iconBtn('var(--neg)') }, this.ico('M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14', 16))));
+  }
+  // edição rápida de valor (clique no valor)
+  valueCell(item, positive, compact) {
+    const ed = this.state.editVal;
+    const w = compact ? '86px' : '96px';
+    const fs = compact ? '.88rem' : '1rem';
+    if (ed && ed.id === item.id) {
+      return h('div', { style: { display: 'flex', alignItems: 'center', gap: '3px', flexShrink: 0 } },
+        h('input', { autoFocus: true, inputMode: 'numeric', value: ed.value ? ed.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', onChange: e => { const dg = e.target.value.replace(/\D/g, ''); this.setState({ editVal: { ...ed, value: dg ? parseInt(dg) / 100 : 0 } }); }, onKeyDown: e => { if (e.key === 'Enter') this.commitEdit(); if (e.key === 'Escape') this.setState({ editVal: null }); }, style: this.inp({ width: '100px', padding: '6px 8px', fontSize: '.8rem', textAlign: 'right' }) }),
+        h('button', { title: 'Salvar', onClick: () => this.commitEdit(), style: this.iconBtn('var(--pos)') }, this.ico('M20 6L9 17l-5-5', 15)),
+        h('button', { title: 'Cancelar', onClick: () => this.setState({ editVal: null }), style: this.iconBtn() }, this.ico('M18 6L6 18M6 6l12 12', 15)));
+    }
+    const txt = (compact ? '' : (positive ? '+' : '−')) + this.m(fmt(item.value));
+    const col = compact && this.isDone(item) ? 'var(--muted)' : positive ? 'var(--pos)' : 'var(--ink)';
+    if (item.isFatura) return h('span', { title: 'Soma das compras do cartão', style: this.disp({ fontSize: fs, minWidth: w, textAlign: 'right', color: col }) }, txt);
+    return h('button', { title: 'Clique para alterar o valor', onClick: () => this.setState({ editVal: { id: item.id, value: item.value, item } }), style: this.disp({ fontSize: fs, minWidth: w, textAlign: 'right', color: col, background: 'transparent', border: 'none', borderBottom: '1.5px dashed rgba(70,76,86,.3)', cursor: 'pointer', padding: '2px 0' }) }, txt);
+  }
+  commitEdit() {
+    const ed = this.state.editVal; if (!ed) return;
+    const it = ed.item, v = ed.value;
+    if (!v || v <= 0) { this.setState({ editVal: null }); return this.toast('Valor inválido', 'err'); }
+    let data;
+    if (it.isRec) {
+      const real = { ...it, id: uid(), recSource: it.recSrcId, recurring: '', value: v };
+      delete real.isRec; delete real.recSrcId;
+      data = { ...this.d, transactions: [...this.d.transactions, real] };
+    } else {
+      data = { ...this.d, transactions: this.d.transactions.map(x => x.id === it.id ? { ...x, value: v } : x) };
+    }
+    this.save(data, () => this.toast('Valor atualizado'));
+    this.setState({ editVal: null });
+  }
+  iconBtn(c = 'var(--muted)') { return { display: 'grid', placeItems: 'center', width: '32px', height: '32px', borderRadius: '10px', border: 'none', background: 'transparent', color: c, cursor: 'pointer' }; }
+
+  /* ---------- 2. PLANEJAMENTO MENSAL ---------- */
+  viewMensal() {
+    const month = this.state.month;
+    const items = this.monthItems(month);
+    const ent = items.filter(i => i.type === 'receita');
+    const sai = items.filter(i => i.type === 'despesa');
+    const totEnt = ent.reduce((a, i) => a + i.value, 0);
+    const totSai = sai.reduce((a, i) => a + this.myShare(i), 0);
+    const pagoSai = sai.filter(i => this.isDone(i)).reduce((a, i) => a + this.myShare(i), 0);
+    const acerto = this.settlement(month);
+    const tab = this.state.mensalTab || 'contas';
+    const faltaSai = totSai - pagoSai;
+    const today = todayISO();
+    const shift = n => { const [y, m] = month.split('-'); const d = new Date(+y, +m - 1 + n, 1); this.setState({ month: d.toISOString().slice(0, 7) }); };
+    const groups = [
+      ['Vencidas', sai.filter(i => !this.isDone(i) && (i.dueDate || i.date) < today), 'var(--neg)'],
+      ['A pagar', sai.filter(i => !this.isDone(i) && (i.dueDate || i.date) >= today), 'var(--warn)'],
+      ['Já paguei', sai.filter(i => this.isDone(i)), 'var(--pos)'],
+    ];
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+      h('div', { style: this.glass({ padding: '18px 22px', display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }) },
+        h('button', { onClick: () => shift(-1), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M15 6l-6 6 6 6', 18)),
+        h('div', { style: { minWidth: '180px', textAlign: 'center' } }, h('div', { style: this.disp({ fontSize: '1.2rem', textTransform: 'capitalize' }) }, mkLong(month))),
+        h('button', { onClick: () => shift(1), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M9 6l6 6-6 6', 18)),
+        h('div', { style: { flex: 1 } }),
+        h('button', { onClick: () => this.setState({ month: todayISO().slice(0, 7) }), style: this.btn('soft', { fontSize: '.83rem' }) }, 'Mês atual')),
+      h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: '12px' } },
+        this.stat('Entra no mês', totEnt, 'var(--pos)'),
+        this.stat('Sai no mês', totSai, 'var(--neg)'),
+        this.stat('Ainda falta pagar', faltaSai, 'var(--warn)'),
+        this.stat('Sobra prevista', totEnt - totSai, totEnt - totSai >= 0 ? 'var(--pos)' : 'var(--neg)')),
+      // progresso
+      h('div', { style: this.glass({ padding: '18px 22px', position: 'relative' }) },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', marginBottom: '9px', alignItems: 'baseline' } },
+          h('span', { style: { fontWeight: 700, fontSize: '.9rem' } }, 'Contas do mês pagas'),
+          h('span', { style: this.disp({ color: 'var(--pink-deep)' }) }, this.state.hideValues ? '••' : pct(totSai > 0 ? pagoSai / totSai * 100 : 0))),
+        h('div', { style: { height: '13px', borderRadius: '999px', background: 'rgba(70,76,86,.13)', overflow: 'hidden' } },
+          h('div', { style: { width: (totSai > 0 ? Math.min(100, pagoSai / totSai * 100) : 0) + '%', height: '100%', borderRadius: '999px', background: 'linear-gradient(90deg,var(--pink),var(--coral))', transition: 'width .5s' } }))),
+      // acerto com o parceiro
+      (acerto.receber > 0 || acerto.pagar > 0) && h('div', { style: this.glass({ padding: '18px 22px', display: 'flex', gap: '18px', flexWrap: 'wrap', alignItems: 'center', borderLeft: '4px solid var(--plum)' }) },
+        h('div', { style: { flex: '1 1 200px' } },
+          h('div', { style: this.disp({ fontSize: '1rem' }) }, 'Acerto com ' + this.partner()),
+          h('div', { style: { fontSize: '.78rem', color: 'var(--muted)' } }, 'referente às despesas divididas deste mês')),
+        h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap' } },
+          h('div', { style: { padding: '10px 16px', borderRadius: '16px', background: 'var(--pos-bg)' } },
+            h('div', { style: { fontSize: '.72rem', color: 'var(--muted)', fontWeight: 700 } }, 'A receber dele'),
+            h('div', { style: this.disp({ fontSize: '1.1rem', color: 'var(--pos)' }) }, this.m(fmt(acerto.receber)))),
+          h('div', { style: { padding: '10px 16px', borderRadius: '16px', background: 'var(--neg-bg)' } },
+            h('div', { style: { fontSize: '.72rem', color: 'var(--muted)', fontWeight: 700 } }, 'A pagar pra ele'),
+            h('div', { style: this.disp({ fontSize: '1.1rem', color: 'var(--neg)' }) }, this.m(fmt(acerto.pagar)))),
+          h('div', { style: { padding: '10px 16px', borderRadius: '16px', background: 'var(--pink-soft)' } },
+            h('div', { style: { fontSize: '.72rem', color: 'var(--pink-deep)', fontWeight: 700 } }, acerto.saldo >= 0 ? 'Sobra pra você' : 'Você deve'),
+            h('div', { style: this.disp({ fontSize: '1.1rem', color: 'var(--pink-deep)' }) }, this.m(fmt(Math.abs(acerto.saldo))))))),
+      // abas
+      h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+        this.chip('Contas do mês', tab === 'contas', () => this.setState({ mensalTab: 'contas' })),
+        this.chip('Cartões de crédito', tab === 'cartoes', () => this.setState({ mensalTab: 'cartoes' }))),
+      tab === 'cartoes' ? this.mensalCartoes(month) :
+      items.length === 0 ? this.empty('Mês vazio', 'Nenhuma conta neste mês. Lance algo na aba Lançamentos ou marque despesas como recorrentes.', h('button', { onClick: () => this.setState({ view: 'lancamentos' }), style: this.btn('primary') }, 'Ir para Lançamentos'), 'wine')
+        : h('div', { style: { display: 'grid', gridTemplateColumns: window.innerWidth < 1000 ? '1fr' : '1.55fr 1fr', gap: '16px', alignItems: 'start' } },
+          h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+            ...groups.filter(([, l]) => l.length).map(([label, list, color]) =>
+              h('div', { key: label, style: this.glass({ padding: '6px 8px 10px' }) },
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 12px 8px' } },
+                  h('span', { style: this.disp({ fontSize: '.96rem', color }) }, `${label} (${list.length})`),
+                  h('span', { style: { fontWeight: 700, fontSize: '.88rem' } }, this.m(fmt(list.reduce((a, i) => a + i.value, 0))))),
+                ...list.map(i => this.monthRow(i, today))))),
+          h('div', { style: this.glass({ padding: '18px 20px' }) },
+            this.head('Entradas do mês'),
+            ent.length === 0 ? h('p', { style: { color: 'var(--muted)', fontSize: '.86rem' } }, 'Nenhuma entrada prevista.')
+              : h('div', null, ...ent.map(i => this.monthRow(i, today))))));
+  }
+  // aba "Cartões de crédito" dentro do planejamento mensal
+  mensalCartoes(month) {
+    if (this.d.cards.length === 0) return this.empty('Nenhum cartão', 'Cadastre seus cartões em Configurações para lançar as compras da fatura aqui.', h('button', { onClick: () => this.setState({ view: 'config' }), style: this.btn('primary') }, 'Ir para Configurações'), 'queen-card');
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } }, ...this.d.cards.map(c => {
+      const compras = this.d.transactions.filter(t => t.card === c.id && t.type === 'despesa' && mk(t.dueDate || t.date) === month).sort((a, b) => (a.dueDate || a.date).localeCompare(b.dueDate || b.date));
+      const total = compras.reduce((a, t) => a + t.value, 0);
+      const minha = compras.reduce((a, t) => a + this.myShare(t), 0);
+      return h('div', { key: c.id, style: this.glass({ padding: '0', overflow: 'hidden' }) },
+        h('div', { style: { padding: '18px 22px', background: `linear-gradient(135deg,${c.color},${c.color}cc)`, color: '#fff', display: 'flex', flexWrap: 'wrap', gap: '14px', alignItems: 'center' } },
+          h('div', { style: { flex: '1 1 190px' } },
+            h('div', { style: this.disp({ fontSize: '1.05rem' }) }, c.name),
+            h('div', { style: { fontSize: '.75rem', opacity: .88 } }, `Fatura de ${mkLong(month)} • vence dia ${c.dueDay}`)),
+          h('div', { style: { textAlign: 'right' } },
+            h('div', { style: { fontSize: '.72rem', opacity: .88 } }, 'Total da fatura'),
+            h('div', { style: this.disp({ fontSize: '1.4rem' }) }, this.m(fmt(total))),
+            minha !== total && h('div', { style: { fontSize: '.76rem', opacity: .92 } }, 'sua parte ' + this.m(fmt(minha))))),
+        h('div', { style: { padding: '14px 18px', display: 'flex', gap: '9px', flexWrap: 'wrap', borderBottom: compras.length ? '1px solid var(--stroke)' : 'none' } },
+          h('button', { onClick: () => this.openCardBuy(c, month), style: this.btn('primary', { fontSize: '.83rem' }) }, this.ico('M12 5v14M5 12h14', 15), 'Lançar compra'),
+          h('button', { onClick: () => this.openImport(c), style: this.btn('ghost', { fontSize: '.83rem' }) }, this.ico('M12 3v12m0 0l-4-4m4 4l4-4M5 21h14', 15), 'Importar PDF/CSV')),
+        compras.length === 0 ? h('p', { style: { padding: '20px 22px', color: 'var(--muted)', fontSize: '.86rem' } }, 'Nenhuma compra nesta fatura ainda. Lance manualmente ou importe o arquivo do banco.')
+          : h('div', { style: { padding: '8px 10px' } }, ...compras.map(t => this.buyRow(t))));
+    }));
+  }
+  buyRow(t) {
+    const split = !!t.split;
+    return h('div', { key: t.id, style: { display: 'flex', alignItems: 'center', gap: '9px', padding: '8px 10px', borderRadius: '14px', flexWrap: 'wrap' } },
+      h('span', { style: { width: '34px', flexShrink: 0, fontSize: '.74rem', fontWeight: 700, color: 'var(--muted)', textAlign: 'center' } }, isoBR(t.dueDate || t.date).slice(0, 5)),
+      h('div', { style: { width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0, background: this.catColor(t.category) } }),
+      h('div', { style: { flex: '1 1 150px', minWidth: 0 } },
+        h('div', { style: { fontWeight: 600, fontSize: '.84rem', textWrap: 'pretty' } }, t.desc,
+          t.installments > 1 && h('span', { style: { color: 'var(--muted)', fontWeight: 400, fontSize: '.73rem' } }, `  ${t.installment}/${t.installments}`)),
+        split && h('div', { style: { fontSize: '.72rem', color: 'var(--plum)', fontWeight: 700 } }, `dividido • sua parte ${this.m(fmt(t.value / 2))} • ${this.paidByMe(t) ? this.partner() + ' te deve' : 'você deve a ' + this.partner()}`)),
+      h('button', { title: split ? 'Dividido — clique para desfazer' : `Dividir com ${this.partner()}`, onClick: () => this.toggleSplit(t), style: { padding: '5px 11px', borderRadius: '999px', border: split ? 'none' : '1px solid var(--stroke)', background: split ? 'var(--plum)' : 'transparent', color: split ? '#fff' : 'var(--muted)', fontWeight: 700, fontSize: '.72rem', cursor: 'pointer', flexShrink: 0 } }, '÷ 50%'),
+      this.valueCell(t, false, true),
+      h('button', { title: 'Editar', onClick: () => this.openTx('edit', t), style: this.iconBtn() }, this.ico('M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', 14)),
+      h('button', { title: 'Excluir', onClick: () => this.delTx(t.id), style: this.iconBtn('var(--neg)') }, this.ico('M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14', 14)));
+  }
+  toggleSplit(t) {
+    const data = { ...this.d, transactions: this.d.transactions.map(x => x.id === t.id ? { ...x, split: !x.split, payer: x.payer || 'eu' } : x) };
+    this.save(data, () => this.toast(t.split ? 'Divisão removida' : 'Dividido 50/50'));
+  }
+  openCardBuy(c, month) {
+    this.openTx('add');
+    setTimeout(() => this.setF({ type: 'despesa', payMethod: 'Cartão', card: c.id, date: month + '-' + todayISO().slice(8), dueDate: month + '-' + todayISO().slice(8), status: 'pendente', more: true }), 0);
+  }
+  stat(label, v, color) { return h('div', { style: this.glass({ padding: '14px 16px', borderLeft: '3px solid ' + (color || 'var(--pink)') }) }, h('div', { style: { fontSize: '.7rem', color: 'var(--muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.05em' } }, label), h('div', { style: this.disp({ fontSize: 'clamp(1.1rem,2vw,1.35rem)', color }) }, this.m(fmt(v)))); }
+  monthRow(i, today) {
+    const done = this.isDone(i);
+    const dd = dayDiff(today, i.dueDate || i.date);
+    const late = !done && dd < 0;
+    const isRec = i.type === 'receita';
+    return h('div', { key: i.id, style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 12px', borderRadius: '14px', opacity: done ? .6 : 1 } },
+      h('button', { title: done ? 'Desmarcar' : 'Marcar como ' + (isRec ? 'recebido' : 'pago'), onClick: () => this.toggleDone(i), style: { width: '26px', height: '26px', flexShrink: 0, borderRadius: '9px', cursor: 'pointer', border: done ? 'none' : `2px solid ${late ? 'var(--neg)' : 'var(--stroke)'}`, background: done ? 'var(--pos)' : 'transparent', color: '#fff', display: 'grid', placeItems: 'center' } }, done && this.ico('M20 6L9 17l-5-5', 15)),
+      h('span', { style: { width: '34px', flexShrink: 0, fontSize: '.74rem', fontWeight: 700, color: late ? 'var(--neg)' : 'var(--muted)', textAlign: 'center' } }, isoBR(i.dueDate || i.date).slice(0, 5)),
+      h('div', { style: { width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0, background: i.isFatura ? i.cardRef.color : this.catColor(i.category) } }),
+      h('div', { style: { flex: 1, minWidth: 0 } },
+        h('div', { style: { fontWeight: 600, fontSize: '.83rem', lineHeight: 1.3, textDecoration: done ? 'line-through' : 'none', textWrap: 'pretty' } },
+          i.isFatura ? i.desc : i.desc,
+          i.isFatura && h('span', { style: { color: 'var(--muted)', fontWeight: 400, fontSize: '.72rem' } }, `  ${i.count} compras`),
+          i.isRec && h('span', { style: { color: 'var(--pink-deep)', fontWeight: 700, fontSize: '.72rem' } }, '  ↻'),
+          i.installments > 1 && h('span', { style: { color: 'var(--muted)', fontWeight: 400, fontSize: '.72rem' } }, `  ${i.installment}/${i.installments}`)),
+        i.split && h('div', { style: { fontSize: '.71rem', color: 'var(--plum)', fontWeight: 700 } }, `÷ sua parte ${this.m(fmt(this.myShare(i)))}${this.credit(i) > 0 ? ' • a receber ' + this.m(fmt(this.credit(i))) : ''}${this.debt(i) > 0 ? ' • você deve ' + this.m(fmt(this.debt(i))) : ''}`)),
+      this.valueCell(i, isRec, true),
+      i.isFatura ? h('button', { title: 'Ver compras deste cartão', onClick: () => this.setState({ view: 'lancamentos', source: 'card:' + i.cardRef.id }), style: this.iconBtn() }, this.ico('M2 6h20v12H2zM2 10h20', 14))
+        : i.isRec ? h('span', { style: { width: '32px' } })
+          : h('button', { title: 'Editar', onClick: () => this.openTx('edit', i), style: this.iconBtn() }, this.ico('M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', 14)));
+  }
+
+  /* ---------- 3. RELATÓRIO ANUAL ---------- */
+  viewAnual() {
+    const y = this.state.year;
+    const months = Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, '0')}`);
+    const txY = this.d.transactions.filter(t => (t.dueDate || t.date).slice(0, 4) === String(y));
+    const rowFor = k => {
+      const list = txY.filter(t => mk(t.dueDate || t.date) === k);
+      const e = list.filter(t => t.type === 'receita').reduce((a, t) => a + t.value, 0);
+      const s = list.filter(t => t.type === 'despesa').reduce((a, t) => a + t.value, 0);
+      return { e, s, r: e - s };
+    };
+    const rows = months.map(rowFor);
+    const totE = rows.reduce((a, r) => a + r.e, 0), totS = rows.reduce((a, r) => a + r.s, 0);
+    // matriz categoria × mês
+    const catTotals = {};
+    txY.filter(t => t.type === 'despesa').forEach(t => {
+      catTotals[t.category] = catTotals[t.category] || { total: 0, m: Array(12).fill(0) };
+      catTotals[t.category].total += t.value;
+      catTotals[t.category].m[+mk(t.dueDate || t.date).slice(5) - 1] += t.value;
+    });
+    const catRows = Object.entries(catTotals).sort((a, b) => b[1].total - a[1].total);
+    const maxCat = catRows.length ? catRows[0][1].total : 1;
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+      h('div', { style: this.glass({ padding: '16px 22px', display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }) },
+        h('button', { onClick: () => this.setState({ year: y - 1 }), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M15 6l-6 6 6 6', 18)),
+        h('div', { style: this.disp({ fontSize: '1.3rem', minWidth: '80px', textAlign: 'center' }) }, y),
+        h('button', { onClick: () => this.setState({ year: y + 1 }), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M9 6l6 6-6 6', 18)),
+        h('div', { style: { flex: 1 } }),
+        h('button', { onClick: () => this.exportCSV(), style: this.btn('ghost', { fontSize: '.83rem' }) }, this.ico('M12 3v12m0 0l-4-4m4 4l4-4M5 21h14', 15), 'Exportar CSV')),
+      h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: '12px' } },
+        this.stat('Entradas no ano', totE, 'var(--pos)'),
+        this.stat('Saídas no ano', totS, 'var(--neg)'),
+        this.stat('Resultado', totE - totS, totE - totS >= 0 ? 'var(--pos)' : 'var(--neg)'),
+        this.stat('Média de saídas/mês', totS / 12, 'var(--plum)')),
+      h('div', { style: this.glass({ padding: '20px 22px', position: 'relative' }) }, this.head('Entradas × Saídas', 'mês a mês'), h('div', { style: { height: '260px' } }, h('canvas', { id: 'ch-year' }))),
+      // tabela mensal
+      h('div', { style: this.glass({ padding: '20px 22px', overflowX: 'auto' }) }, this.head('Resumo mensal'),
+        h('div', { style: { minWidth: '520px' } },
+          h('div', { style: { display: 'grid', gridTemplateColumns: '1fr repeat(3,1fr)', gap: '8px', padding: '0 4px 9px', borderBottom: '1px solid var(--stroke)', fontSize: '.74rem', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em' } },
+            h('span', null, 'Mês'), h('span', { style: { textAlign: 'right' } }, 'Entradas'), h('span', { style: { textAlign: 'right' } }, 'Saídas'), h('span', { style: { textAlign: 'right' } }, 'Resultado')),
+          ...months.map((k, i) => {
+            const r = rows[i]; const cur = k === todayISO().slice(0, 7);
+            if (!r.e && !r.s) return h('div', { key: k, style: { display: 'grid', gridTemplateColumns: '1fr repeat(3,1fr)', gap: '8px', padding: '9px 4px', borderBottom: '1px solid var(--stroke)', opacity: .4, fontSize: '.84rem' } }, h('span', null, MONTHS[i]), h('span', { style: { textAlign: 'right' } }, '—'), h('span', { style: { textAlign: 'right' } }, '—'), h('span', { style: { textAlign: 'right' } }, '—'));
+            return h('div', { key: k, style: { display: 'grid', gridTemplateColumns: '1fr repeat(3,1fr)', gap: '8px', padding: '10px 4px', borderBottom: '1px solid var(--stroke)', fontSize: '.86rem', background: cur ? 'var(--pink-soft)' : 'transparent', borderRadius: cur ? '10px' : 0 } },
+              h('span', { style: { fontWeight: cur ? 700 : 500 } }, MONTHS[i]),
+              h('span', { style: { textAlign: 'right', color: 'var(--pos)' } }, this.m(fmtK(r.e))),
+              h('span', { style: { textAlign: 'right', color: 'var(--neg)' } }, this.m(fmtK(r.s))),
+              h('span', { style: { textAlign: 'right', fontWeight: 700, color: r.r >= 0 ? 'var(--pos)' : 'var(--neg)' } }, this.m(fmtK(r.r))));
+          }),
+          h('div', { style: { display: 'grid', gridTemplateColumns: '1fr repeat(3,1fr)', gap: '8px', padding: '12px 4px 0', fontSize: '.9rem', fontWeight: 700 } },
+            h('span', null, 'Total'), h('span', { style: { textAlign: 'right', color: 'var(--pos)' } }, this.m(fmtK(totE))), h('span', { style: { textAlign: 'right', color: 'var(--neg)' } }, this.m(fmtK(totS))), h('span', { style: { textAlign: 'right', color: totE - totS >= 0 ? 'var(--pos)' : 'var(--neg)' } }, this.m(fmtK(totE - totS)))))),
+      // despesas por categoria no ano
+      h('div', { style: this.glass({ padding: '20px 22px' }) }, this.head('Saídas por categoria', 'total do ano'),
+        catRows.length === 0 ? h('p', { style: { color: 'var(--muted)', fontSize: '.87rem' } }, 'Sem saídas registradas neste ano.')
+          : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '11px' } }, ...catRows.map(([cid, v]) =>
+            h('div', { key: cid },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '.86rem', marginBottom: '5px' } },
+                h('span', { style: { fontWeight: 600 } }, this.catName(cid)),
+                h('span', null, this.m(fmt(v.total)), h('span', { style: { color: 'var(--muted)', fontSize: '.76rem' } }, '  ' + pct(totS ? v.total / totS * 100 : 0)))),
+              h('div', { style: { height: '9px', borderRadius: '999px', background: 'rgba(70,76,86,.1)', overflow: 'hidden' } },
+                h('div', { style: { width: (v.total / maxCat * 100) + '%', height: '100%', background: this.catColor(cid) } })))))),
+      // matriz categoria × mês
+      catRows.length > 0 && h('div', { style: this.glass({ padding: '20px 22px', overflowX: 'auto' }) }, this.head('Categoria mês a mês'),
+        h('div', { style: { minWidth: '760px' } },
+          h('div', { style: { display: 'grid', gridTemplateColumns: '140px repeat(12,1fr)', gap: '4px', paddingBottom: '8px', borderBottom: '1px solid var(--stroke)', fontSize: '.68rem', fontWeight: 700, color: 'var(--muted)' } },
+            h('span', null, ''), ...MONTHS_S.map(m => h('span', { key: m, style: { textAlign: 'center' } }, m))),
+          ...catRows.map(([cid, v]) => h('div', { key: cid, style: { display: 'grid', gridTemplateColumns: '140px repeat(12,1fr)', gap: '4px', padding: '6px 0', borderBottom: '1px solid var(--stroke)', alignItems: 'center' } },
+            h('span', { style: { fontSize: '.76rem', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '6px', overflow: 'hidden' } }, h('span', { style: { width: '7px', height: '7px', borderRadius: '50%', background: this.catColor(cid), flexShrink: 0 } }), h('span', { style: { whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, this.catName(cid))),
+            ...v.m.map((val, i) => h('span', { key: i, title: val ? fmt(val) : '', style: { textAlign: 'center', fontSize: '.68rem', padding: '4px 2px', borderRadius: '7px', fontWeight: val ? 700 : 400, color: val ? '#fff' : 'var(--muted)', background: val ? this.catColor(cid) + (val > maxCat / 12 ? 'ee' : '99') : 'transparent' } }, val ? this.m(Math.round(val / 100) / 10 + 'k').replace('0k', 'k') : '·')))))));
+  }
+
+  /* ---------- 4. METAS / INVESTIMENTOS ---------- */
+  viewMetas() {
+    const gs = this.d.goals || [];
+    const totalGuardado = gs.reduce((a, g) => a + (g.saved || 0), 0);
+    const totalObjetivo = gs.reduce((a, g) => a + (g.total || 0), 0);
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+      h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: '12px' } },
+        this.stat('Total investido', totalGuardado, 'var(--pos)'),
+        this.stat('Objetivo total', totalObjetivo, 'var(--plum)'),
+        this.stat('Falta guardar', Math.max(0, totalObjetivo - totalGuardado), 'var(--pink-deep)')),
+      h('div', { style: { display: 'flex', justifyContent: 'flex-end' } }, h('button', { onClick: () => this.openGoal('add'), style: this.btn('primary') }, this.ico('M12 5v14M5 12h14', 17), 'Nova meta')),
+      gs.length === 0 ? this.empty('Sem metas ainda', 'Cadastre onde você quer chegar: reserva de emergência, investimentos, uma viagem. Acompanhe o progresso mês a mês.', h('button', { onClick: () => this.openGoal('add'), style: this.btn('primary') }, 'Criar primeira meta'), 'ticket')
+        : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(330px,1fr))', gap: '16px' } }, ...gs.map(g => this.goalTile(g))));
+  }
+  goalTile(g) {
+    const p = g.total > 0 ? (g.saved / g.total) * 100 : 0;
+    const rest = Math.max(0, g.total - g.saved);
+    const monthsLeft = g.date ? Math.max(0, Math.ceil(dayDiff(todayISO(), g.date) / 30)) : null;
+    const perMonth = monthsLeft ? rest / monthsLeft : (g.monthly || 0);
+    const prC = { alta: 'var(--neg)', 'média': 'var(--warn)', baixa: 'var(--pos)' }[g.priority] || 'var(--plum)';
+    return h('div', { key: g.id, style: this.glass({ padding: '22px' }) },
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' } },
+        h('div', null,
+          h('div', { style: this.disp({ fontSize: '1.06rem' }) }, g.name),
+          h('div', { style: { display: 'flex', gap: '6px', marginTop: '5px', flexWrap: 'wrap' } },
+            g.kind && h('span', { style: { fontSize: '.69rem', fontWeight: 700, padding: '3px 9px', borderRadius: '999px', background: 'var(--pink-soft)', color: 'var(--pink-deep)' } }, g.kind),
+            h('span', { style: { fontSize: '.69rem', fontWeight: 700, padding: '3px 9px', borderRadius: '999px', background: prC + '22', color: prC } }, 'prioridade ' + (g.priority || '—')))),
+        h('div', { style: { display: 'flex' } },
+          h('button', { onClick: () => this.openGoal('edit', g), style: this.iconBtn() }, this.ico('M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', 15)),
+          h('button', { onClick: () => this.delGoal(g.id), style: this.iconBtn('var(--neg)') }, this.ico('M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14', 15)))),
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', margin: '16px 0 8px' } },
+        h('span', { style: this.disp({ fontSize: '1.35rem', color: 'var(--pos)' }) }, this.m(fmt(g.saved))),
+        h('span', { style: { color: 'var(--muted)', fontSize: '.86rem' } }, 'de ' + this.m(fmt(g.total)))),
+      h('div', { style: { height: '13px', borderRadius: '999px', background: 'rgba(70,76,86,.13)', overflow: 'hidden' } },
+        h('div', { style: { width: Math.min(100, p) + '%', height: '100%', borderRadius: '999px', background: 'linear-gradient(90deg,var(--pink),var(--coral))', transition: 'width .5s' } })),
+      h('div', { style: { textAlign: 'right', fontSize: '.8rem', fontWeight: 700, color: 'var(--pink-deep)', marginTop: '6px' } }, this.state.hideValues ? '••' : pct(p)),
+      h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '9px', marginTop: '14px' } },
+        this.mini('Falta', this.m(fmt(rest))),
+        this.mini('Por mês', this.m(fmt(perMonth))),
+        this.mini('Meses restantes', monthsLeft !== null ? monthsLeft : '—'),
+        this.mini('Data alvo', g.date ? isoBR(g.date) : '—')),
+      h('button', { onClick: () => this.setState({ modal: { type: 'aporte', payload: g }, form: { amount: 0 } }), style: this.btn('soft', { width: '100%', justifyContent: 'center', marginTop: '13px' }) }, this.ico('M12 5v14M5 12h14', 16), 'Registrar aporte'));
+  }
+  mini(l, v) { return h('div', { style: { background: 'rgba(255,255,255,.7)', border: '1px solid var(--stroke)', borderRadius: '14px', padding: '9px 12px' } }, h('div', { style: { fontSize: '.7rem', color: 'var(--muted)', fontWeight: 600 } }, l), h('div', { style: { fontWeight: 700, fontSize: '.88rem' } }, v)); }
+  openGoal(mode, g) { this.setState({ modal: { type: 'goal', mode }, form: g ? { ...g } : { name: '', kind: 'Reserva', total: 0, saved: 0, date: '', priority: 'média', monthly: 0 } }); }
+  saveGoal() {
+    const f = this.state.form;
+    if (!f.name) return this.toast('Dá um nome pra meta', 'err');
+    if (!f.total || f.total <= 0) return this.toast('Informe o objetivo', 'err');
+    const goals = [...(this.d.goals || [])];
+    if (this.state.modal.mode === 'edit') { const i = goals.findIndex(g => g.id === f.id); goals[i] = { ...f }; } else goals.push({ ...f, id: uid() });
+    this.save({ ...this.d, goals }, () => this.toast('Meta salva'));
+    this.setState({ modal: null });
+  }
+  delGoal(id) { this.setState({ confirm: { msg: 'Excluir esta meta?', onYes: () => { this.save({ ...this.d, goals: this.d.goals.filter(g => g.id !== id) }, () => this.toast('Excluída', 'warn')); this.setState({ confirm: null }); } } }); }
+  confirmAporte() { const g = this.state.modal.payload; this.save({ ...this.d, goals: this.d.goals.map(x => x.id === g.id ? { ...x, saved: (x.saved || 0) + (this.state.form.amount || 0) } : x) }, () => this.toast('Aporte registrado!')); this.setState({ modal: null }); }
+
+  /* ---------- 5. CONFIGURAÇÕES ---------- */
+  viewConfig() {
+    const tog = (label, on, fn) => h('button', { onClick: fn, style: { display: 'flex', alignItems: 'center', gap: '11px', border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--ink)', padding: 0 } },
+      h('div', { style: { width: '46px', height: '27px', borderRadius: '999px', background: on ? 'var(--pink)' : 'rgba(70,76,86,.22)', position: 'relative', transition: 'background .2s' } },
+        h('div', { style: { width: '21px', height: '21px', borderRadius: '50%', background: '#fff', position: 'absolute', top: '3px', left: on ? '22px' : '3px', transition: 'left .2s', boxShadow: '0 2px 5px rgba(0,0,0,.2)' } })),
+      h('span', { style: { fontSize: '.9rem' } }, label));
+    const me = this.me, other = this.otherUser();
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+      // conta e acesso
+      h('div', { style: this.glass({ padding: '22px' }) }, this.head('Conta e acesso', 'cada pessoa vê só os próprios lançamentos'),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' } },
+          h('div', { style: { width: '44px', height: '44px', borderRadius: '50%', background: 'var(--pink)', color: '#fff', display: 'grid', placeItems: 'center', fontWeight: 700, fontSize: '1.05rem' } }, (me.name || '?').slice(0, 1).toUpperCase()),
+          h('div', { style: { flex: 1, minWidth: '130px' } },
+            h('div', { style: { fontWeight: 700 } }, me.name),
+            h('div', { style: { fontSize: '.76rem', color: 'var(--muted)' } }, me.login)),
+          h('button', { onClick: () => this.setState({ modal: { type: 'pw' }, form: {} }), style: this.btn('soft', { fontSize: '.83rem' }) }, 'Trocar senha'),
+          h('button', { onClick: () => this.logout(), style: this.btn('ghost', { fontSize: '.83rem' }) }, 'Sair')),
+        h('div', { style: { marginTop: '14px', padding: '13px 15px', borderRadius: '16px', background: 'var(--pink-soft)', color: 'var(--pink-deep)', fontSize: '.83rem', lineHeight: 1.5 } },
+          other ? `Lançamentos marcados como divididos com ${other.name} aparecem para vocês dois — o resto é só seu.` : 'Para dividir despesas com outra pessoa, crie o segundo usuário no painel do Supabase (Authentication › Users) — ele aparece aqui sozinho. Depois, o que for marcado como dividido aparece para vocês dois.'),
+        other && h('div', { style: { marginTop: '12px', display: 'flex', alignItems: 'center', gap: '12px', padding: '11px 14px', borderRadius: '10px', border: '1px solid var(--stroke)', flexWrap: 'wrap' } },
+          h('div', { style: { width: '34px', height: '34px', borderRadius: '50%', background: 'var(--pink-soft)', color: 'var(--pink-deep)', display: 'grid', placeItems: 'center', fontWeight: 700, fontSize: '.85rem' } }, (other.name || '?').slice(0, 1).toUpperCase()),
+          h('div', { style: { flex: 1, minWidth: '120px' } },
+            h('div', { style: { fontWeight: 600, fontSize: '.88rem' } }, other.name),
+            h('div', { style: { fontSize: '.74rem', color: 'var(--muted)' } }, other.login + ' • segunda conta')),
+          h('button', { onClick: () => this.delUser(other), style: this.btn('ghost', { fontSize: '.8rem', color: 'var(--neg)', borderColor: 'var(--stroke)' }) }, 'Apagar dados')),
+        h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap', marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--stroke)' } },
+          h('button', { onClick: () => this.delUser(me), style: this.btn('ghost', { fontSize: '.8rem', color: 'var(--neg)' }) }, 'Apagar meus dados'),
+          h('button', { onClick: () => this.resetAll(), style: this.btn('ghost', { fontSize: '.8rem', color: 'var(--neg)' }) }, 'Recomeçar do zero'))),
+      // cartões
+      h('div', { style: this.glass({ padding: '22px' }) },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', flexWrap: 'wrap', gap: '10px' } },
+          h('h2', { style: this.disp({ fontSize: '1.12rem' }) }, 'Cartões'),
+          h('button', { onClick: () => this.openCard('add'), style: this.btn('soft', { fontSize: '.83rem' }) }, '+ Novo cartão')),
+        this.d.cards.filter(c => !c._foreign).length === 0 ? h('p', { style: { color: 'var(--muted)', fontSize: '.87rem' } }, 'Nenhum cartão cadastrado.')
+          : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(280px,1fr))', gap: '12px' } }, ...this.d.cards.filter(c => !c._foreign).map(c => {
+            const usado = this.d.transactions.filter(t => t.card === c.id && t.status !== 'pago').reduce((a, t) => a + t.value, 0);
+            return h('div', { key: c.id, style: { borderRadius: '20px', padding: '16px 18px', background: `linear-gradient(135deg,${c.color},${c.color}cc)`, color: '#fff' } },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' } },
+                h('div', null, h('div', { style: this.disp({ fontSize: '1rem' }) }, c.name), h('div', { style: { fontSize: '.74rem', opacity: .85 } }, `${c.brand || ''} • fecha ${c.closeDay} • vence ${c.dueDay}`)),
+                h('div', { style: { display: 'flex' } },
+                  h('button', { onClick: () => this.openCard('edit', c), style: this.iconBtn('#fff') }, this.ico('M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', 14)),
+                  h('button', { onClick: () => this.delCard(c.id), style: this.iconBtn('#fff') }, this.ico('M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14', 14)))),
+              h('div', { style: { marginTop: '14px', fontSize: '.72rem', opacity: .85 } }, 'Em aberto'),
+              h('div', { style: this.disp({ fontSize: '1.3rem' }) }, this.m(fmt(usado))),
+              h('button', { onClick: () => this.openImport(c), style: { marginTop: '12px', width: '100%', padding: '9px', borderRadius: '999px', border: '1px solid rgba(255,255,255,.5)', background: 'rgba(255,255,255,.18)', color: '#fff', fontWeight: 700, fontSize: '.8rem', cursor: 'pointer' } }, 'Importar fatura (PDF/CSV)'));
+          }))),
+      // contas
+      h('div', { style: this.glass({ padding: '22px' }) },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' } },
+          h('h2', { style: this.disp({ fontSize: '1.12rem' }) }, 'Contas'),
+          h('button', { onClick: () => this.openAcc('add'), style: this.btn('soft', { fontSize: '.83rem' }) }, '+ Nova conta')),
+        this.d.accounts.length === 0 ? h('p', { style: { color: 'var(--muted)', fontSize: '.87rem' } }, 'Nenhuma conta cadastrada.')
+          : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '8px' } }, ...this.d.accounts.map(a => h('div', { key: a.id, style: { display: 'flex', alignItems: 'center', gap: '11px', padding: '11px 14px', borderRadius: '16px', background: 'rgba(255,255,255,.7)', border: '1px solid var(--stroke)' } },
+            h('div', { style: { width: '12px', height: '12px', borderRadius: '5px', background: a.color } }),
+            h('div', { style: { flex: 1 } }, h('div', { style: { fontWeight: 700, fontSize: '.9rem' } }, a.name), h('div', { style: { fontSize: '.74rem', color: 'var(--muted)', textTransform: 'capitalize' } }, a.type)),
+            h('span', { style: { fontWeight: 700, fontSize: '.88rem' } }, this.m(fmt(this.balances()[a.id] || 0))),
+            h('button', { onClick: () => this.openAcc('edit', a), style: this.iconBtn() }, this.ico('M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', 14)),
+            h('button', { onClick: () => this.delAcc(a.id), style: this.iconBtn('var(--neg)') }, this.ico('M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14', 14)))))),
+      // categorias
+      h('div', { style: this.glass({ padding: '22px' }) },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' } },
+          h('h2', { style: this.disp({ fontSize: '1.12rem' }) }, 'Categorias'),
+          h('button', { onClick: () => this.openCat('add'), style: this.btn('soft', { fontSize: '.83rem' }) }, '+ Nova')),
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px' } }, ...this.d.categories.map(c => h('span', { key: c.id, style: { display: 'inline-flex', alignItems: 'center', gap: '7px', padding: '7px 12px', borderRadius: '999px', background: c.color + '20', color: c.color, fontSize: '.82rem', fontWeight: 700 } },
+          c.name,
+          h('button', { onClick: () => this.openCat('edit', c), style: { border: 'none', background: 'transparent', cursor: 'pointer', color: 'inherit', opacity: .7 } }, '✎'),
+          h('button', { onClick: () => this.delCat(c.id), style: { border: 'none', background: 'transparent', cursor: 'pointer', color: 'inherit', opacity: .7 } }, '×'))))),
+      // preferências
+      h('div', { style: this.glass({ padding: '22px' }) }, this.head('Preferências'),
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+          !this.otherUser() && h('label', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
+            h('span', { style: { fontSize: '.85rem', fontWeight: 600 } }, 'Com quem você divide as despesas'),
+            h('input', { value: this.partner(), onChange: e => this.save({ ...this.d, meta: { ...this.d.meta, partnerName: e.target.value } }), placeholder: 'Parceiro(a)', style: this.inp({ maxWidth: '280px' }) })),
+          tog('Esconder valores da tela', this.state.hideValues, () => this.savePrefs({ hideValues: !this.state.hideValues })),
+          tog('Reduzir animações', this.state.motion === 'reduced', () => this.savePrefs({ motion: this.state.motion === 'reduced' ? 'full' : 'reduced' })),
+          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '10px' } },
+            h('span', { style: { fontSize: '.9rem' } }, 'Tamanho da fonte'),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+              h('button', { onClick: () => this.savePrefs({ fontSize: Math.max(13, this.state.fontSize - 1) }), style: this.btn('ghost', { padding: '7px 13px' }) }, 'A−'),
+              h('span', { style: { minWidth: '48px', textAlign: 'center', fontWeight: 700 } }, this.state.fontSize + 'px'),
+              h('button', { onClick: () => this.savePrefs({ fontSize: Math.min(20, this.state.fontSize + 1) }), style: this.btn('ghost', { padding: '7px 13px' }) }, 'A+'))))),
+      // dados
+      h('div', { style: this.glass({ padding: '22px' }) }, this.head('Seus dados', 'sincronizados na sua conta do Supabase'),
+        h('div', { style: { padding: '13px 15px', borderRadius: '16px', background: 'var(--pink-soft)', color: 'var(--pink-deep)', fontSize: '.83rem', lineHeight: 1.5, marginBottom: '16px' } }, 'Tudo fica guardado na sua conta do Supabase e aparece em qualquer aparelho onde você entrar com sua senha. Para trazer dados da versão antiga (que ficava só no navegador), use "Restaurar backup" com o arquivo .json exportado de lá.'),
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '10px' } },
+          h('button', { onClick: () => this.exportJSON(), style: this.btn('primary') }, this.ico('M12 3v12m0 0l-4-4m4 4l4-4M5 21h14', 16), 'Fazer backup'),
+          h('button', { onClick: () => this._fi && this._fi.click(), style: this.btn('ghost') }, this.ico('M12 21V9m0 0l-4 4m4-4l4 4M5 3h14', 16), 'Restaurar backup'),
+          h('button', { onClick: () => this.exportCSV(), style: this.btn('ghost') }, this.ico('M4 4h16v16H4zM4 9h16', 16), 'Exportar CSV'),
+          h('input', { type: 'file', accept: '.json', ref: el => this._fi = el, style: { display: 'none' }, onChange: e => this.importJSON(e) })),
+        h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '18px', paddingTop: '18px', borderTop: '1px solid var(--stroke)' } },
+          h('button', { onClick: () => this.setState({ confirm: { msg: 'Carregar dados de demonstração? Os dados atuais serão substituídos.', onYes: () => { this.save(buildDemo(), () => this.toast('Demo carregada')); this.setState({ confirm: null }); } } }), style: this.btn('soft') }, 'Carregar demonstração'),
+          h('button', { onClick: () => this.setState({ confirm: { danger: true, msg: 'Apagar TODOS os dados? Isso não pode ser desfeito — faça um backup antes.', onYes: () => { this.save(emptyData(), () => this.toast('Tudo apagado', 'warn')); this.setState({ confirm: null }); } } }), style: this.btn('ghost', { color: 'var(--neg)', borderColor: 'var(--neg)' }) }, 'Apagar tudo'))));
+  }
+  openCard(mode, c) { this.setState({ modal: { type: 'card', mode }, form: c ? { ...c } : { name: '', brand: '', limit: 0, closeDay: 1, dueDay: 10, color: '#E8557F', payAccount: (this.d.accounts[0] || {}).id || '' } }); }
+  saveCard() { const f = this.state.form; if (!f.name) return this.toast('Nome do cartão', 'err'); const cards = [...this.d.cards]; if (this.state.modal.mode === 'edit') { const i = cards.findIndex(c => c.id === f.id); cards[i] = { ...f }; } else cards.push({ ...f, id: uid() }); this.save({ ...this.d, cards }, () => this.toast('Cartão salvo')); this.setState({ modal: null }); }
+  delCard(id) { this.setState({ confirm: { msg: 'Excluir este cartão? Os lançamentos continuam salvos.', onYes: () => { this.save({ ...this.d, cards: this.d.cards.filter(c => c.id !== id) }, () => this.toast('Excluído', 'warn')); this.setState({ confirm: null }); } } }); }
+  openAcc(mode, a) { this.setState({ modal: { type: 'acc', mode }, form: a ? { ...a } : { name: '', type: 'banco', balance: 0, color: '#E8557F' } }); }
+  saveAcc() { const f = this.state.form; if (!f.name) return this.toast('Nome da conta', 'err'); const accounts = [...this.d.accounts]; if (this.state.modal.mode === 'edit') { const i = accounts.findIndex(a => a.id === f.id); accounts[i] = { ...f }; } else accounts.push({ ...f, id: uid() }); this.save({ ...this.d, accounts }, () => this.toast('Conta salva')); this.setState({ modal: null }); }
+  delAcc(id) { this.setState({ confirm: { msg: 'Excluir esta conta?', onYes: () => { this.save({ ...this.d, accounts: this.d.accounts.filter(a => a.id !== id) }, () => this.toast('Excluída', 'warn')); this.setState({ confirm: null }); } } }); }
+  openCat(mode, c) { this.setState({ modal: { type: 'cat', mode }, form: c ? { ...c } : { name: '', color: '#E8557F' } }); }
+  saveCat() { const f = this.state.form; if (!f.name) return this.toast('Nome da categoria', 'err'); const categories = [...this.d.categories]; if (this.state.modal.mode === 'edit') { const i = categories.findIndex(c => c.id === f.id); categories[i] = { ...f }; } else categories.push({ ...f, id: uid() }); this.save({ ...this.d, categories }, () => this.toast('Categoria salva')); this.setState({ modal: null }); }
+  delCat(id) { this.setState({ confirm: { msg: 'Excluir esta categoria?', onYes: () => { this.save({ ...this.d, categories: this.d.categories.filter(c => c.id !== id) }, () => this.toast('Excluída', 'warn')); this.setState({ confirm: null }); } } }); }
+
+  /* ===== backup ===== */
+  dl(name, content, type) { const b = new Blob([content], { type }); const u = URL.createObjectURL(b); const a = document.createElement('a'); a.href = u; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(u), 1000); }
+  exportJSON() { this.dl(`backup-financas-${todayISO()}.json`, JSON.stringify(this.d, null, 2), 'application/json'); this.toast('Backup criado'); }
+  exportCSV() {
+    const head = ['Data', 'Descrição', 'Tipo', 'Categoria', 'Valor', 'Status', 'Vencimento', 'Conta', 'Cartão', 'Forma', 'Parcela', 'Recorrência', 'Observações'];
+    const rows = this.d.transactions.map(t => [isoBR(t.date), t.desc, t.type, this.catName(t.category), String(t.value).replace('.', ','), t.status, isoBR(t.dueDate), (this.acc(t.account) || {}).name || '', (this.card(t.card) || {}).name || '', t.payMethod || '', t.installments > 1 ? `${t.installment}/${t.installments}` : '', t.recurring || '', (t.notes || '').replace(/;/g, ',')]);
+    const csv = [head, ...rows].map(r => r.map(c => `"${String(c == null ? '' : c).replace(/"/g, '""')}"`).join(';')).join('\n');
+    this.dl(`lancamentos-${todayISO()}.csv`, '\ufeff' + csv, 'text/csv'); this.toast('CSV exportado');
+  }
+  importJSON(e) {
+    const file = e.target.files[0]; if (!file) return;
+    const r = new FileReader();
+    r.onload = () => { try { const o = JSON.parse(r.result); if (!o.transactions || !o.categories) throw 0; this.setState({ confirm: { msg: 'Restaurar este backup? Os dados atuais serão substituídos.', onYes: () => { if (!o.meta) o.meta = {}; if (!o.goals) o.goals = []; remapOwners(o, this.state.auth.users, this.me.id); this.save(normalizeDoc(o), () => this.toast('Backup restaurado')); this.setState({ confirm: null }); } } }); } catch (err) { this.toast('Arquivo inválido', 'err'); } };
+    r.readAsText(file); e.target.value = '';
+  }
+
+  /* ===== importar fatura ===== */
+  openImport(c) { this.setState({ modal: { type: 'import', payload: { card: c } }, form: { rows: [], parsing: false, fileName: '' } }); }
+  parseBR(s) { if (!s) return NaN; let v = String(s).replace(/[R$\s]/g, '').replace(/[^\d.,-]/g, ''); if (v.indexOf(',') > -1) v = v.replace(/\./g, '').replace(',', '.'); const n = parseFloat(v); return isNaN(n) ? NaN : n; }
+  parseDate(s, fy) {
+    if (!s) return '';
+    let m = s.match(/(\d{2})\/(\d{2})\/(\d{4})/); if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+    m = s.match(/(\d{2})\/(\d{2})\/(\d{2})/); if (m) return `20${m[3]}-${m[2]}-${m[1]}`;
+    m = s.match(/(\d{4})-(\d{2})-(\d{2})/); if (m) return `${m[1]}-${m[2]}-${m[3]}`;
+    m = s.match(/(\d{2})\/(\d{2})(?!\d)/); if (m) return `${fy || new Date().getFullYear()}-${m[2]}-${m[1]}`;
+    const M = { jan: '01', fev: '02', mar: '03', abr: '04', mai: '05', jun: '06', jul: '07', ago: '08', set: '09', out: '10', nov: '11', dez: '12' };
+    m = s.match(/(\d{1,2})\s*(?:de\s*)?([a-zç]{3})/i); if (m && M[m[2].toLowerCase()]) return `${fy || new Date().getFullYear()}-${M[m[2].toLowerCase()]}-${m[1].padStart(2, '0')}`;
+    return '';
+  }
+  extract(lines) {
+    const yr = new Date().getFullYear(); const out = [];
+    const skip = /(total|subtotal|saldo|limite|pagamento\s+m[ií]nimo|vencimento|fechamento|fatura\s+anterior|encargos|juros\s+do|iof|multa)/i;
+    lines.forEach(raw => {
+      const line = raw.replace(/\s+/g, ' ').trim(); if (!line || line.length < 6) return;
+      const vm = line.match(/-?\s*R?\$?\s*\d{1,3}(?:\.\d{3})*,\d{2}(?!\d)/g) || line.match(/-?\s*\d+\.\d{2}(?!\d)/g);
+      if (!vm) return;
+      const value = this.parseBR(vm[vm.length - 1]); if (isNaN(value) || value === 0) return;
+      const dm = line.match(/\d{2}\/\d{2}(?:\/\d{2,4})?/) || line.match(/\d{1,2}\s*(?:de\s*)?[a-zç]{3}/i);
+      const date = dm ? this.parseDate(dm[0], yr) : todayISO();
+      let desc = line; if (dm) desc = desc.replace(dm[0], ' '); vm.forEach(v => desc = desc.replace(v, ' '));
+      desc = desc.replace(/R?\$/g, '').replace(/\s+/g, ' ').replace(/^[;,\s]+|[;,\s]+$/g, '').trim();
+      let inst = '', insts = '';
+      const pm = desc.match(/(\d{1,2})\s*\/\s*(\d{1,2})/); if (pm) { inst = +pm[1]; insts = +pm[2]; }
+      if (!desc || desc.length < 2) desc = 'Lançamento';
+      if (skip.test(line) && !dm) return;
+      out.push({ include: !skip.test(line), date, desc: desc.slice(0, 60), value: Math.abs(value), installment: inst, installments: insts, category: '' });
+    });
+    return out;
+  }
+  async onImportFile(e) {
+    const file = e.target.files[0]; e.target.value = ''; if (!file) return;
+    this.setF({ parsing: true, fileName: file.name, rows: [] });
+    try {
+      if (/\.csv$/i.test(file.name) || file.type === 'text/csv') {
+        const text = await file.text(); const lines = text.split(/\r?\n/);
+        const delim = (lines[0] || '').indexOf(';') > -1 ? ';' : ((lines[0] || '').indexOf('\t') > -1 ? '\t' : ',');
+        const st = [];
+        lines.forEach(l => {
+          const cols = l.split(delim).map(s => s.trim().replace(/^"|"$/g, '')); if (cols.length < 2) return;
+          const vc = cols.find(c => /-?\s*R?\$?\s*\d+[.,]\d{2}/.test(c)); const dc = cols.find(c => /\d{2}\/\d{2}|\d{4}-\d{2}-\d{2}/.test(c));
+          if (!vc) return; const value = this.parseBR(vc); if (isNaN(value)) return;
+          if (/descri|valor|data|hist[oó]rico/i.test(l) && st.length === 0) return;
+          let desc = cols.filter(c => c !== vc && c !== dc && c.length > 1).sort((a, b) => b.length - a.length)[0] || 'Lançamento';
+          st.push({ include: true, date: dc ? this.parseDate(dc) : todayISO(), desc: desc.replace(/^[;,\s]+|[;,\s]+$/g, '').slice(0, 60), value: Math.abs(value), installment: '', installments: '', category: '' });
+        });
+        this.setF({ rows: st.length ? st : this.extract(lines), parsing: false });
+      } else if (/\.pdf$/i.test(file.name) || file.type === 'application/pdf') {
+        if (!window.pdfjsLib) { this.setF({ parsing: false }); return this.toast('Leitor de PDF carregando, tenta de novo', 'err'); }
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+        const pdf = await window.pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise;
+        const lines = [];
+        for (let p = 1; p <= pdf.numPages; p++) {
+          const content = await (await pdf.getPage(p)).getTextContent();
+          const byY = {}; content.items.forEach(it => { const y = Math.round(it.transform[5]); (byY[y] = byY[y] || []).push([it.transform[4], it.str]); });
+          Object.keys(byY).sort((a, b) => b - a).forEach(y => lines.push(byY[y].sort((a, b) => a[0] - b[0]).map(x => x[1]).join(' ')));
+        }
+        this.setF({ rows: this.extract(lines), parsing: false });
+      } else { this.setF({ parsing: false }); this.toast('Use PDF ou CSV', 'err'); }
+    } catch (err) { this.setF({ parsing: false }); this.toast('Não consegui ler o arquivo', 'err'); }
+  }
+  confirmImport() {
+    const card = this.state.modal.payload.card;
+    const rows = (this.state.form.rows || []).filter(r => r.include && r.value > 0);
+    if (!rows.length) return this.toast('Nenhum item selecionado', 'err');
+    const defCat = (this.d.categories[0] || {}).id || '';
+    const add = rows.map(r => ({ id: uid(), desc: r.desc, value: r.value, type: 'despesa', category: r.category || defCat, date: r.date || todayISO(), dueDate: r.date || todayISO(), card: card.id, account: card.payAccount || '', payMethod: 'Cartão', status: 'pendente', installment: r.installment || '', installments: r.installments || '', split: !!r.split, payer: 'eu', tags: ['fatura'], notes: '', subcategory: '' }));
+    this.save({ ...this.d, transactions: [...this.d.transactions, ...add] }, () => this.toast(`${add.length} lançamentos importados`));
+    this.setState({ modal: null });
+  }
+
+  /* ===== CHARTS ===== */
+  syncCharts() {
+    if (!window.Chart) return;
+    const sig = this.state.view + '|' + this.state.year + '|' + this.d.transactions.length + '|' + this.state.hideValues;
+    if (sig === this._sig) return; this._sig = sig;
+    Object.values(this._charts).forEach(c => { try { c.destroy(); } catch (e) {} }); this._charts = {};
+    if (this.state.view !== 'anual') return;
+    const el = document.getElementById('ch-year'); if (!el) return;
+    const css = getComputedStyle(document.documentElement);
+    Chart.defaults.font.family = "'DM Sans',sans-serif";
+    Chart.defaults.color = css.getPropertyValue('--ink').trim();
+    const y = this.state.year;
+    const months = Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, '0')}`);
+    const ent = months.map(k => this.d.transactions.filter(t => mk(t.dueDate || t.date) === k && t.type === 'receita').reduce((a, t) => a + t.value, 0));
+    const sai = months.map(k => this.d.transactions.filter(t => mk(t.dueDate || t.date) === k && t.type === 'despesa').reduce((a, t) => a + t.value, 0));
+    this._charts.y = new Chart(el, {
+      type: 'bar',
+      data: { labels: MONTHS_S, datasets: [{ label: 'Entradas', data: ent, backgroundColor: css.getPropertyValue('--pos').trim(), borderRadius: 10, maxBarThickness: 26 }, { label: 'Saídas', data: sai, backgroundColor: css.getPropertyValue('--pink').trim(), borderRadius: 10, maxBarThickness: 26 }] },
+      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8, padding: 16, font: { weight: 700 } } }, tooltip: { enabled: !this.state.hideValues } }, scales: { x: { grid: { display: false } }, y: { grid: { color: 'rgba(150,70,100,.09)' }, ticks: { callback: v => 'R$' + (v / 1000) + 'k' } } } }
+    });
+  }
+
+  /* ===== MODAIS ===== */
+  field(label, node, opt) { return h('label', { style: { display: 'flex', flexDirection: 'column', gap: '6px', flex: (opt && opt.flex) || '1 1 auto' } }, h('span', { style: { fontSize: '.79rem', fontWeight: 700, color: 'var(--muted)' } }, label, opt && opt.req && h('span', { style: { color: 'var(--pink)' } }, ' *')), node); }
+  money(v, on) { return h('input', { inputMode: 'numeric', value: v ? v.toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', onChange: e => { const d = e.target.value.replace(/\D/g, ''); on(d ? parseInt(d) / 100 : 0); }, placeholder: '0,00', style: this.inp() }); }
+  colors(v, on) { const p = ['#E8557F', '#C93E68', '#F58A5E', '#E5AE49', '#8E5C86', '#A87BD1', '#4E9E76', '#5FAFC4', '#6E8DC4', '#EC7BA6', '#69AF9A', '#C9A05C']; return h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px' } }, ...p.map(c => h('button', { key: c, onClick: () => on(c), style: { width: '32px', height: '32px', borderRadius: '11px', background: c, border: v === c ? '3px solid var(--ink)' : '2px solid transparent', cursor: 'pointer' } }))); }
+  shell(title, body, footer, wide) {
+    return h('div', { onClick: () => this.setState({ modal: null }), style: { position: 'fixed', inset: 0, background: 'rgba(24,28,34,.42)', zIndex: 70, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' } },
+      h('div', { onClick: e => e.stopPropagation(), style: this.glass({ width: wide ? 'min(640px,96vw)' : 'min(490px,96vw)', maxHeight: '92vh', overflow: 'auto', background: '#fff', animation: 'pop .2s both' }) },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '20px 24px', borderBottom: '1px solid var(--stroke)', position: 'sticky', top: 0, background: '#fff', zIndex: 2 } },
+          h('h2', { style: this.disp({ fontSize: '1.14rem' }) }, title),
+          h('button', { onClick: () => this.setState({ modal: null }), style: this.iconBtn() }, this.ico('M18 6L6 18M6 6l12 12', 20))),
+        h('div', { style: { padding: '22px 24px' } }, body),
+        footer && h('div', { style: { display: 'flex', gap: '10px', justifyContent: 'flex-end', padding: '16px 24px', borderTop: '1px solid var(--stroke)', position: 'sticky', bottom: 0, background: '#fff' } }, footer)));
+  }
+  sharedField(f) {
+    const o = this.otherUser(); if (!o) return null;
+    return h('button', { onClick: () => this.setF({ shared: !f.shared }), style: { display: 'flex', alignItems: 'center', gap: '11px', border: '1px solid var(--stroke)', background: f.shared ? 'var(--pink-soft)' : 'transparent', borderRadius: '18px', padding: '12px 15px', cursor: 'pointer', color: 'var(--ink)', textAlign: 'left' } },
+      h('div', { style: { width: '46px', height: '27px', borderRadius: '999px', background: f.shared ? 'var(--pink)' : 'rgba(70,76,86,.22)', position: 'relative', flexShrink: 0, transition: 'background .2s' } },
+        h('div', { style: { width: '21px', height: '21px', borderRadius: '50%', background: '#fff', position: 'absolute', top: '3px', left: f.shared ? '22px' : '3px', transition: 'left .2s', boxShadow: '0 2px 5px rgba(0,0,0,.2)' } })),
+      h('span', { style: { fontSize: '.88rem', fontWeight: 600 } }, 'Visível também para ' + o.name));
+  }
+  renderModal() {
+    const M = this.state.modal; if (!M) return null;
+    const f = this.state.form;
+    const cancel = h('button', { onClick: () => this.setState({ modal: null }), style: this.btn('ghost') }, 'Cancelar');
+    if (M.type === 'pw') return this.shell(this.state.recovery ? 'Criar uma senha nova' : 'Trocar senha',
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+        this.field('Nova senha', h('input', { type: 'password', value: f.pass || '', onChange: e => this.setF({ pass: e.target.value }), style: this.inp() })),
+        this.field('Repita a nova senha', h('input', { type: 'password', value: f.pass2 || '', onChange: e => this.setF({ pass2: e.target.value }), style: this.inp() }))),
+      [cancel, h('button', { onClick: () => this.changePw(), style: this.btn('primary') }, 'Salvar')]);
+    if (M.type === 'tx') return this.txModal(f, cancel);
+    if (M.type === 'import') return this.importModal(f, cancel);
+    if (M.type === 'pay') {
+      const it = M.payload, isRec = it.type === 'receita';
+      return this.shell(isRec ? 'Marcar como recebido' : 'Marcar como pago',
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+          h('p', { style: { color: 'var(--muted)', fontSize: '.9rem' } }, `${it.desc} — ${fmt(it.value)}${it.isFatura ? ` (${it.count} compras)` : ''}`),
+          this.field(isRec ? 'Entrou em qual conta?' : 'Saiu de qual conta?', h('select', { value: f.account, onChange: e => this.setF({ account: e.target.value }), style: this.inp() }, h('option', { value: '' }, 'Selecione…'), ...this.d.accounts.map(a => h('option', { key: a.id, value: a.id }, a.name))))),
+        [cancel, h('button', { onClick: () => this.confirmPay(), style: this.btn('primary') }, this.ico('M20 6L9 17l-5-5', 16), 'Confirmar')]);
+    }
+    if (M.type === 'goal') return this.shell(M.mode === 'edit' ? 'Editar meta' : 'Nova meta',
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+        this.field('Nome', h('input', { value: f.name, onChange: e => this.setF({ name: e.target.value }), placeholder: 'Reserva de emergência', style: this.inp() }), { req: 1 }),
+        this.field('Tipo', h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap' } }, ...['Reserva', 'Renda fixa', 'Ações', 'Cripto', 'Objetivo'].map(k => this.chip(k, f.kind === k, () => this.setF({ kind: k }))))),
+        h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } }, this.field('Objetivo', this.money(f.total, v => this.setF({ total: v })), { req: 1 }), this.field('Já tenho', this.money(f.saved, v => this.setF({ saved: v })))),
+        h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } }, this.field('Data alvo', h('input', { type: 'date', value: f.date, onChange: e => this.setF({ date: e.target.value }), style: this.inp() })), this.field('Prioridade', h('select', { value: f.priority, onChange: e => this.setF({ priority: e.target.value }), style: this.inp() }, ...['alta', 'média', 'baixa'].map(p => h('option', { key: p, value: p }, p))))),
+        this.field('Aporte mensal planejado', this.money(f.monthly, v => this.setF({ monthly: v }))),
+        this.sharedField(f)),
+      [cancel, h('button', { onClick: () => this.saveGoal(), style: this.btn('primary') }, 'Salvar')]);
+    if (M.type === 'aporte') return this.shell('Registrar aporte',
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } }, h('p', { style: { color: 'var(--muted)', fontSize: '.9rem' } }, M.payload.name), this.field('Quanto você guardou?', this.money(f.amount, v => this.setF({ amount: v })))),
+      [cancel, h('button', { onClick: () => this.confirmAporte(), style: this.btn('primary') }, 'Guardar')]);
+    if (M.type === 'card') return this.shell(M.mode === 'edit' ? 'Editar cartão' : 'Novo cartão',
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+        h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } }, this.field('Nome', h('input', { value: f.name, onChange: e => this.setF({ name: e.target.value }), style: this.inp() }), { req: 1 }), this.field('Bandeira', h('input', { value: f.brand, onChange: e => this.setF({ brand: e.target.value }), placeholder: 'Visa…', style: this.inp() }))),
+        this.field('Limite', this.money(f.limit, v => this.setF({ limit: v }))),
+        h('div', { style: { display: 'flex', gap: '12px' } }, this.field('Fecha dia', h('input', { type: 'number', min: 1, max: 31, value: f.closeDay, onChange: e => this.setF({ closeDay: +e.target.value }), style: this.inp() })), this.field('Vence dia', h('input', { type: 'number', min: 1, max: 31, value: f.dueDay, onChange: e => this.setF({ dueDay: +e.target.value }), style: this.inp() }))),
+        this.field('Conta de pagamento', h('select', { value: f.payAccount, onChange: e => this.setF({ payAccount: e.target.value }), style: this.inp() }, h('option', { value: '' }, '—'), ...this.d.accounts.map(a => h('option', { key: a.id, value: a.id }, a.name)))),
+        this.field('Cor', this.colors(f.color, c => this.setF({ color: c }))),
+        this.sharedField(f)),
+      [cancel, h('button', { onClick: () => this.saveCard(), style: this.btn('primary') }, 'Salvar')]);
+    if (M.type === 'acc') return this.shell(M.mode === 'edit' ? 'Editar conta' : 'Nova conta',
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+        this.field('Nome', h('input', { value: f.name, onChange: e => this.setF({ name: e.target.value }), style: this.inp() }), { req: 1 }),
+        this.field('Tipo', h('select', { value: f.type, onChange: e => this.setF({ type: e.target.value }), style: this.inp() }, ...[['banco', 'Conta bancária'], ['dinheiro', 'Dinheiro / carteira'], ['investimento', 'Investimento']].map(([v, l]) => h('option', { key: v, value: v }, l)))),
+        this.field('Saldo inicial', this.money(f.balance, v => this.setF({ balance: v }))),
+        this.field('Cor', this.colors(f.color, c => this.setF({ color: c }))),
+        this.sharedField(f)),
+      [cancel, h('button', { onClick: () => this.saveAcc(), style: this.btn('primary') }, 'Salvar')]);
+    if (M.type === 'cat') return this.shell(M.mode === 'edit' ? 'Editar categoria' : 'Nova categoria',
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+        this.field('Nome', h('input', { value: f.name, onChange: e => this.setF({ name: e.target.value }), style: this.inp() }), { req: 1 }),
+        this.field('Cor', this.colors(f.color, c => this.setF({ color: c })))),
+      [cancel, h('button', { onClick: () => this.saveCat(), style: this.btn('primary') }, 'Salvar')]);
+    return null;
+  }
+  txModal(f, cancel) {
+    const isRec = f.type === 'receita';
+    return this.shell(this.state.modal.mode === 'edit' ? 'Editar lançamento' : 'Novo lançamento',
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+        // tipo
+        h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '9px' } }, ...[['despesa', 'Saída', 'var(--neg)'], ['receita', 'Entrada', 'var(--pos)']].map(([v, l, c]) =>
+          h('button', { key: v, onClick: () => this.setF({ type: v, status: v === 'receita' ? (f.status === 'pago' ? 'recebido' : 'a receber') : (f.status === 'recebido' ? 'pago' : 'pendente') }), style: { padding: '14px', borderRadius: '18px', border: f.type === v ? `2px solid ${c}` : '1px solid var(--stroke)', background: f.type === v ? c + '18' : 'var(--card-2)', color: f.type === v ? c : 'var(--ink)', fontWeight: 700, cursor: 'pointer', fontSize: '.95rem' } }, l))),
+        // descrição + valor
+        h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
+          this.field('O que foi?', h('input', { autoFocus: true, value: f.desc, onChange: e => this.setF({ desc: e.target.value }), placeholder: 'Ex: mercado', style: this.inp() }), { req: 1, flex: '2 1 200px' }),
+          this.field('Quanto?', this.money(f.value, v => this.setF({ value: v })), { req: 1, flex: '1 1 130px' })),
+        // data + categoria
+        h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
+          this.field('Quando?', h('input', { type: 'date', value: f.date, onChange: e => this.setF({ date: e.target.value, dueDate: f.dueDate || e.target.value }), style: this.inp() }), { req: 1 }),
+          this.field('Categoria', h('select', { value: f.category, onChange: e => this.setF({ category: e.target.value }), style: this.inp() }, h('option', { value: '' }, 'Escolher…'), ...this.d.categories.map(c => h('option', { key: c.id, value: c.id }, c.name))))),
+        // forma de pagamento
+        this.field('Como pagou?', h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap' } }, ...PAY_METHODS.map(p => this.chip(p, f.payMethod === p, () => this.setF({ payMethod: p, card: p === 'Cartão' ? (f.card || (this.d.cards[0] || {}).id || '') : '' }))))),
+        f.payMethod === 'Cartão' && h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
+          this.field('Qual cartão?', h('select', { value: f.card, onChange: e => this.setF({ card: e.target.value }), style: this.inp() }, h('option', { value: '' }, 'Escolher…'), ...this.d.cards.map(c => h('option', { key: c.id, value: c.id }, c.name)))),
+          this.state.modal.mode === 'add' && this.field('Parcelas', h('input', { type: 'number', min: 1, value: f.installments, onChange: e => this.setF({ installments: e.target.value }), placeholder: '1', style: this.inp() }))),
+        // recorrência
+        this.field('Se repete?', h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap' } },
+          this.chip('Não', !f.recurring, () => this.setF({ recurring: '' })),
+          ...['mensal', 'semanal', 'anual'].map(r => this.chip('↻ ' + r, f.recurring === r, () => this.setF({ recurring: r }))))),
+        // já pago
+        h('button', { onClick: () => this.setF({ status: this.isDone(f) ? (isRec ? 'a receber' : 'pendente') : (isRec ? 'recebido' : 'pago') }), style: { display: 'flex', alignItems: 'center', gap: '11px', border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--ink)', padding: 0 } },
+          h('div', { style: { width: '46px', height: '27px', borderRadius: '999px', background: this.isDone(f) ? 'var(--pos)' : 'rgba(70,76,86,.22)', position: 'relative', transition: 'background .2s' } },
+            h('div', { style: { width: '21px', height: '21px', borderRadius: '50%', background: '#fff', position: 'absolute', top: '3px', left: this.isDone(f) ? '22px' : '3px', transition: 'left .2s', boxShadow: '0 2px 5px rgba(0,0,0,.2)' } })),
+          h('span', { style: { fontSize: '.9rem', fontWeight: 600 } }, isRec ? 'Já recebi' : 'Já paguei')),
+        // dividir com o parceiro
+        f.type === 'despesa' && h('div', { style: { padding: '13px 15px', borderRadius: '18px', background: f.split ? 'rgba(142,92,134,.12)' : 'transparent', border: '1px solid var(--stroke)', display: 'flex', flexDirection: 'column', gap: '11px' } },
+          h('button', { onClick: () => this.setF({ split: !f.split, payer: f.payer || 'eu' }), style: { display: 'flex', alignItems: 'center', gap: '11px', border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--ink)', padding: 0 } },
+            h('div', { style: { width: '46px', height: '27px', borderRadius: '999px', background: f.split ? 'var(--plum)' : 'rgba(70,76,86,.22)', position: 'relative', transition: 'background .2s' } },
+              h('div', { style: { width: '21px', height: '21px', borderRadius: '50%', background: '#fff', position: 'absolute', top: '3px', left: f.split ? '22px' : '3px', transition: 'left .2s', boxShadow: '0 2px 5px rgba(0,0,0,.2)' } })),
+            h('span', { style: { fontSize: '.9rem', fontWeight: 600 } }, 'Dividir 50/50 com ' + this.partner())),
+          f.split && h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap', alignItems: 'center' } },
+            h('span', { style: { fontSize: '.78rem', fontWeight: 700, color: 'var(--muted)' } }, 'Quem pagou?'),
+            this.chip('Eu paguei', (f.payer || 'eu') === 'eu', () => this.setF({ payer: 'eu' }), 'var(--plum)'),
+            this.chip(this.partner() + ' pagou', f.payer === 'parceiro', () => this.setF({ payer: 'parceiro' }), 'var(--plum)')),
+          f.split && f.value > 0 && h('div', { style: { fontSize: '.79rem', color: 'var(--plum)', fontWeight: 700 } }, `Sua parte: ${fmt(f.value / 2)} • ${(f.payer || 'eu') === 'eu' ? this.partner() + ' te deve ' + fmt(f.value / 2) : 'você deve ' + fmt(f.value / 2) + ' a ' + this.partner()}`)),
+        // mais detalhes
+        h('button', { onClick: () => this.setF({ more: !f.more }), style: { display: 'flex', alignItems: 'center', gap: '8px', border: 'none', background: 'transparent', color: 'var(--pink-deep)', cursor: 'pointer', fontWeight: 700, fontSize: '.86rem', padding: 0 } }, this.ico(f.more ? 'M18 15l-6-6-6 6' : 'M6 9l6 6 6-6', 16), f.more ? 'Menos detalhes' : 'Mais detalhes'),
+        f.more && h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px', borderTop: '1px solid var(--stroke)', paddingTop: '14px' } },
+          h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
+            this.field('Vencimento', h('input', { type: 'date', value: f.dueDate, onChange: e => this.setF({ dueDate: e.target.value }), style: this.inp() })),
+            this.field('Conta', h('select', { value: f.account, onChange: e => this.setF({ account: e.target.value }), style: this.inp() }, h('option', { value: '' }, '—'), ...this.d.accounts.map(a => h('option', { key: a.id, value: a.id }, a.name))))),
+          this.field('Observações', h('textarea', { value: f.notes, onChange: e => this.setF({ notes: e.target.value }), rows: 2, style: this.inp({ resize: 'vertical' }) })),
+          this.field('Tags', h('input', { value: (f.tags || []).join(', '), onChange: e => this.setF({ tags: e.target.value.split(',').map(t => t.trim()).filter(Boolean) }), placeholder: 'essencial, casa', style: this.inp() })))),
+      [cancel, h('button', { onClick: () => this.saveTx(), style: this.btn('primary') }, this.ico('M20 6L9 17l-5-5', 16), 'Salvar')], true);
+  }
+  importModal(f, cancel) {
+    const card = this.state.modal.payload.card;
+    const rows = f.rows || [];
+    const sel = rows.filter(r => r.include);
+    const setRow = (i, p) => this.setF({ rows: rows.map((r, j) => j === i ? { ...r, ...p } : r) });
+    const fileInput = h('input', { type: 'file', accept: '.pdf,.csv,application/pdf,text/csv', ref: el => this._imp = el, style: { display: 'none' }, onChange: e => this.onImportFile(e) });
+    return this.shell('Importar fatura — ' + card.name,
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+        rows.length === 0 ? h('div', null,
+          h('div', { onClick: () => !f.parsing && this._imp && this._imp.click(), style: { border: '2px dashed var(--stroke)', borderRadius: '20px', padding: '34px 20px', textAlign: 'center', cursor: f.parsing ? 'default' : 'pointer', background: 'rgba(255,255,255,.6)' } },
+            f.parsing ? h('div', { style: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px', color: 'var(--pink-deep)' } }, h('div', { style: { width: '28px', height: '28px', border: '3px solid var(--pink-soft)', borderTopColor: 'var(--pink)', borderRadius: '50%', animation: 'spin .8s linear infinite' } }), h('span', null, 'Lendo ' + f.fileName + '…'))
+              : h('div', { style: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '9px' } }, h('div', { style: { color: 'var(--pink)' } }, this.ico('M12 3v12m0 0l-4-4m4 4l4-4M5 21h14', 34)), h('div', { style: { fontWeight: 700 } }, 'Escolher PDF ou CSV'), h('div', { style: { fontSize: '.82rem', color: 'var(--muted)' } }, 'da fatura deste cartão'))),
+          fileInput,
+          h('div', { style: { marginTop: '14px', padding: '12px 14px', borderRadius: '16px', background: 'var(--pink-soft)', color: 'var(--pink-deep)', fontSize: '.81rem', lineHeight: 1.5 } }, 'Leio os lançamentos e mostro pra você conferir antes de salvar. Cada banco formata diferente, então revise os valores. O arquivo não sai do seu dispositivo.'))
+          : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px' } },
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' } },
+              h('span', { style: { fontSize: '.84rem', color: 'var(--muted)' } }, `${rows.length} encontrados • `, h('strong', { style: { color: 'var(--ink)' } }, `${sel.length} selecionados = ${fmt(sel.reduce((a, r) => a + r.value, 0))}`)),
+              h('button', { onClick: () => this.setF({ rows: rows.map(r => ({ ...r, split: !rows.every(x => x.split) })) }), style: this.btn('ghost', { padding: '7px 12px', fontSize: '.78rem' }) }, '÷ Dividir todos'),
+              h('button', { onClick: () => this._imp && this._imp.click(), style: this.btn('ghost', { padding: '7px 12px', fontSize: '.78rem' }) }, 'Trocar arquivo'), fileInput),
+            h('div', { style: { maxHeight: '46vh', overflow: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' } }, ...rows.map((r, i) =>
+              h('div', { key: i, style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '8px 10px', borderRadius: '14px', background: r.include ? 'rgba(255,255,255,.75)' : 'transparent', opacity: r.include ? 1 : .5 } },
+                h('input', { type: 'checkbox', checked: r.include, onChange: e => setRow(i, { include: e.target.checked }), style: { width: '17px', height: '17px', accentColor: 'var(--pink)', cursor: 'pointer', flexShrink: 0 } }),
+                h('input', { type: 'date', value: r.date, onChange: e => setRow(i, { date: e.target.value }), style: this.inp({ width: '126px', padding: '6px 8px', fontSize: '.76rem', flexShrink: 0 }) }),
+                h('input', { value: r.desc, onChange: e => setRow(i, { desc: e.target.value }), style: this.inp({ padding: '6px 8px', fontSize: '.76rem', flex: 1, minWidth: '80px' }) }),
+                h('select', { value: r.category, onChange: e => setRow(i, { category: e.target.value }), style: this.inp({ width: '104px', padding: '6px 5px', fontSize: '.72rem', flexShrink: 0 }) }, h('option', { value: '' }, 'Categoria'), ...this.d.categories.map(c => h('option', { key: c.id, value: c.id }, c.name))),
+                h('button', { title: `Dividir com ${this.partner()}`, onClick: () => setRow(i, { split: !r.split }), style: { padding: '5px 9px', borderRadius: '999px', border: r.split ? 'none' : '1px solid var(--stroke)', background: r.split ? 'var(--plum)' : 'transparent', color: r.split ? '#fff' : 'var(--muted)', fontWeight: 700, fontSize: '.7rem', cursor: 'pointer', flexShrink: 0 } }, '÷'),
+                h('input', { inputMode: 'numeric', value: r.value ? r.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', onChange: e => { const d = e.target.value.replace(/\D/g, ''); setRow(i, { value: d ? parseInt(d) / 100 : 0 }); }, style: this.inp({ width: '92px', padding: '6px 8px', fontSize: '.76rem', textAlign: 'right', flexShrink: 0 }) })))))),
+      rows.length > 0 ? [cancel, h('button', { onClick: () => this.confirmImport(), style: this.btn('primary') }, `Importar ${sel.length}`)] : [cancel], true);
+  }
+  renderConfirm() {
+    const c = this.state.confirm; if (!c) return null;
+    return h('div', { onClick: () => this.setState({ confirm: null }), style: { position: 'fixed', inset: 0, background: 'rgba(24,28,34,.42)', zIndex: 90, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' } },
+      h('div', { onClick: e => e.stopPropagation(), style: this.glass({ width: 'min(400px,94vw)', padding: '28px', textAlign: 'center', background: '#fff', animation: 'pop .2s both' }) },
+        h('div', { style: { width: '54px', height: '54px', margin: '0 auto 14px', borderRadius: '18px', background: c.danger ? 'var(--neg-bg)' : 'var(--warn-bg)', color: c.danger ? 'var(--neg)' : 'var(--warn)', display: 'grid', placeItems: 'center' } }, this.ico('M12 9v4m0 4h.01M10.3 3.9l-8 14A2 2 0 004 21h16a2 2 0 001.7-3l-8-14a2 2 0 00-3.4 0z', 26)),
+        h('p', { style: { fontSize: '.94rem', lineHeight: 1.5, marginBottom: '20px' } }, c.msg),
+        h('div', { style: { display: 'flex', gap: '10px', justifyContent: 'center' } },
+          h('button', { onClick: () => this.setState({ confirm: null }), style: this.btn('ghost') }, 'Cancelar'),
+          h('button', { onClick: c.onYes, style: this.btn('primary', c.danger ? { background: 'var(--neg)', boxShadow: '0 8px 20px rgba(222,108,99,.35)' } : {}) }, 'Confirmar'))));
+  }
+  renderToast() {
+    const t = this.state.toast; if (!t) return null;
+    const c = { ok: 'var(--pos)', warn: 'var(--warn)', err: 'var(--neg)' }[t.kind] || 'var(--pos)';
+    return h('div', { key: t.id, style: { position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)', zIndex: 100, animation: 'pop .25s both' } },
+      h('div', { style: this.glass({ padding: '13px 22px', display: 'flex', alignItems: 'center', gap: '11px', borderRadius: '999px', background: '#fff', borderLeft: `4px solid ${c}` }) },
+        h('div', { style: { color: c } }, this.ico(t.kind === 'err' ? 'M12 9v4m0 4h.01M10.3 3.9l-8 14A2 2 0 004 21h16a2 2 0 001.7-3l-8-14a2 2 0 00-3.4 0z' : 'M20 6L9 17l-5-5', 19)),
+        h('span', { style: { fontWeight: 700, fontSize: '.89rem' } }, t.msg)));
+  }
+}
+
+/* ===== montagem ===== */
+(function () {
+  const el = document.getElementById('root');
+  const props = { accent: (window.FINCONFIG && window.FINCONFIG.accent) || '#6E747F' };
+  const node = h(Component, props);
+  if (ReactDOM.createRoot) ReactDOM.createRoot(el).render(node);
+  else ReactDOM.render(node, el);
+})();
