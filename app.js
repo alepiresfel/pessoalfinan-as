@@ -175,7 +175,20 @@ class Component extends React.Component {
   otherUser() { const a = this.state.auth; return a.users.find(u => u.id !== a.currentId) || null; }
   saveAuth(auth, cb) { this.setState({ auth }, () => { cb && cb(); }); }
   mine(x) { const me = this.me; if (!me) return true; if (x.split || x.shared) return true; return (x.owner || me.id) === me.id; }
-  paidByMe(t) { const me = this.me; const said = (t.payer || 'eu') === 'eu'; if (!me) return said; return said === ((t.owner || me.id) === me.id); }
+  /* Uma conta pode ser minha, do parceiro (lançada por qualquer um dos dois) ou
+     dividida 50/50. `owner` diz de quem ela é; `shared` deixa os dois enxergarem. */
+  isForOther(t) { const me = this.me; return !!(me && t && t.owner && t.owner !== me.id && !t.split); }
+  ownerName(t) { const o = (this.state.auth.users || []).find(u => u.id === t.owner); return (o && o.name) || this.partner(); }
+  /* Quem pagou, como id de usuário. Lançamentos antigos guardavam 'eu'/'parceiro'
+     em relação a quem lançou — aqui isso é convertido. */
+  payerOf(t) {
+    const me = this.me; if (!me) return '';
+    if (t.payerId) return t.payerId;
+    const criador = t.owner || me.id;
+    const outro = criador === me.id ? ((this.otherUser() || {}).id || '') : me.id;
+    return (t.payer || 'eu') === 'eu' ? criador : outro;
+  }
+  paidByMe(t) { const me = this.me; return !me || this.payerOf(t) === me.id; }
   /* ===== Supabase: sessão, dados e sincronização ===== */
   async boot() {
     if (!window.SB) return this.setState({ booting: false, authErr: 'Faltam as chaves do Supabase no arquivo config.js.' });
@@ -322,9 +335,26 @@ class Component extends React.Component {
   isDone(t) { return t.status === 'pago' || t.status === 'recebido'; }
   partner() { const o = this.otherUser(); return (o && o.name) || (this.d.meta && this.d.meta.partnerName) || 'Parceiro(a)'; }
   // divisão de despesas com o parceiro
-  myShare(t) { return t.isFatura ? t.myValue : (t.split ? t.value / 2 : t.value); }
-  credit(t) { return t.isFatura ? (t.creditVal || 0) : (t.split && t.type === 'despesa' && this.paidByMe(t) ? t.value / 2 : 0); }
-  debt(t) { return t.isFatura ? (t.debtVal || 0) : (t.split && t.type === 'despesa' && !this.paidByMe(t) ? t.value / 2 : 0); }
+  /* Quanto desta conta é despesa minha: metade se dividida, nada se for do parceiro. */
+  myShare(t) {
+    if (t.isFatura) return t.myValue;
+    if (t.split) return t.value / 2;
+    return this.isForOther(t) ? 0 : t.value;
+  }
+  /* Quanto o parceiro me deve por causa desta conta. */
+  credit(t) {
+    if (t.isFatura) return t.creditVal || 0;
+    if (t.type !== 'despesa' || !this.paidByMe(t)) return 0;
+    if (t.split) return t.value / 2;
+    return this.isForOther(t) ? t.value : 0;      // conta dele que eu paguei
+  }
+  /* Quanto eu devo ao parceiro por causa desta conta. */
+  debt(t) {
+    if (t.isFatura) return t.debtVal || 0;
+    if (t.type !== 'despesa' || this.paidByMe(t)) return 0;
+    if (t.split) return t.value / 2;
+    return this.isForOther(t) ? 0 : t.value;      // conta minha que ele pagou
+  }
   settlement(month) {
     const items = this.monthItems(month);
     let receber = 0, pagar = 0;
@@ -345,21 +375,52 @@ class Component extends React.Component {
   totalBalance() { const b = this.balances(); return Object.values(b).reduce((s, v) => s + v, 0); }
 
   // faturas de cartão agregadas por cartão/mês
+  /* Em qual fatura a compra cai. A fatura fecha no dia `closeDay`: compras
+     até esse dia entram nela, depois disso vão para a seguinte. O vencimento
+     é o dia `dueDay` — no mesmo mês do fechamento, ou no mês seguinte quando
+     o cartão vence antes de fechar. Devolve a data ISO do vencimento. */
+  faturaDue(card, iso) {
+    const close = Math.max(1, parseInt(card && card.closeDay) || 1);
+    const due = Math.max(1, parseInt(card && card.dueDay) || 10);
+    const [y, m, d] = (iso || todayISO()).split('-').map(Number);
+    let shift = 0;
+    if (d > close) shift += 1;      // comprou depois de fechar → entra na próxima fatura
+    if (due <= close) shift += 1;   // vence antes de fechar → paga no mês seguinte
+    const ref = new Date(y, (m - 1) + shift, 1);
+    const Y = ref.getFullYear(), M = ref.getMonth() + 1;
+    const dd = Math.min(due, new Date(Y, M, 0).getDate());
+    return `${Y}-${String(M).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+  }
+  /* Último dia de compra que ainda entra na fatura que vence em `monthKey`. */
+  faturaClose(card, monthKey) {
+    const close = Math.max(1, parseInt(card && card.closeDay) || 1);
+    const due = Math.max(1, parseInt(card && card.dueDay) || 10);
+    const [y, m] = monthKey.split('-').map(Number);
+    const ref = new Date(y, (m - 1) - (due <= close ? 1 : 0), 1);
+    const Y = ref.getFullYear(), M = ref.getMonth() + 1;
+    const dd = Math.min(close, new Date(Y, M, 0).getDate());
+    return `${Y}-${String(M).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+  }
+  /* Compras que compõem a fatura que vence no mês `monthKey`. */
+  comprasDaFatura(card, monthKey) {
+    return this.d.transactions
+      .filter(t => t.card === card.id && t.type === 'despesa' && mk(this.faturaDue(card, t.dueDate || t.date)) === monthKey)
+      .sort((a, b) => (a.dueDate || a.date).localeCompare(b.dueDate || b.date));
+  }
   faturas() {
     const groups = {};
     this.d.transactions.filter(t => t.type === 'despesa' && t.card).forEach(t => {
       const c = this.card(t.card); if (!c) return;
-      const k = t.card + '|' + mk(t.dueDate || t.date);
-      (groups[k] = groups[k] || { card: c, key: mk(t.dueDate || t.date), txs: [] }).txs.push(t);
+      const venc = this.faturaDue(c, t.dueDate || t.date);
+      const k = t.card + '|' + mk(venc);
+      (groups[k] = groups[k] || { card: c, key: mk(venc), due: venc, txs: [] }).txs.push(t);
     });
     return Object.values(groups).map(g => {
-      const [y, mo] = g.key.split('-');
-      const dd = Math.min(g.card.dueDay || 10, new Date(+y, +mo, 0).getDate());
-      const due = `${y}-${mo}-${String(dd).padStart(2, '0')}`;
+      const due = g.due;
       const total = g.txs.reduce((a, t) => a + t.value, 0);
-      const mine = g.txs.reduce((a, t) => a + (t.split ? t.value / 2 : t.value), 0);
-      const cred = g.txs.reduce((a, t) => a + (t.split && this.paidByMe(t) ? t.value / 2 : 0), 0);
-      const deb = g.txs.reduce((a, t) => a + (t.split && !this.paidByMe(t) ? t.value / 2 : 0), 0);
+      const mine = g.txs.reduce((a, t) => a + this.myShare(t), 0);
+      const cred = g.txs.reduce((a, t) => a + this.credit(t), 0);
+      const deb = g.txs.reduce((a, t) => a + this.debt(t), 0);
       return { id: 'fat|' + g.card.id + '|' + g.key, isFatura: true, cardRef: g.card, monthKey: g.key, txIds: g.txs.map(t => t.id), count: g.txs.length, type: 'despesa', desc: 'Fatura ' + g.card.name, category: catIdOf(this.d.categories, 'Dívidas'), value: total, myValue: mine, creditVal: cred, debtVal: deb, split: mine !== total, date: due, dueDate: due, status: g.txs.every(t => t.status === 'pago') ? 'pago' : 'pendente', payMethod: 'Cartão' };
     });
   }
@@ -422,8 +483,11 @@ class Component extends React.Component {
 
   /* ===== ações ===== */
   openTx(mode, tx) {
-    const base = { desc: '', value: 0, type: 'despesa', category: '', date: todayISO(), dueDate: '', payMethod: 'Pix', card: '', account: this.d.accounts[0] ? this.d.accounts[0].id : '', status: 'pendente', recurring: '', installments: '', installment: '', notes: '', tags: [], subcategory: '', split: false, payer: 'eu', more: false };
-    this.setState({ modal: { type: 'tx', mode }, form: mode === 'edit' && tx ? { ...base, ...tx, tags: tx.tags || [], more: true } : base });
+    const base = { desc: '', value: 0, type: 'despesa', category: '', date: todayISO(), dueDate: '', payMethod: 'Pix', card: '', account: this.d.accounts[0] ? this.d.accounts[0].id : '', status: 'pendente', recurring: '', installments: '', installment: '', notes: '', tags: [], subcategory: '', split: false, payer: 'eu', dono: 'me', payerId: (this.me || {}).id || '', more: false };
+    const form = mode === 'edit' && tx
+      ? { ...base, ...tx, tags: tx.tags || [], dono: tx.split ? 'split' : (this.isForOther(tx) ? 'other' : 'me'), payerId: this.payerOf(tx), more: true }
+      : base;
+    this.setState({ modal: { type: 'tx', mode }, form });
   }
   setF(p) { this.setState({ form: { ...this.state.form, ...p } }); }
   saveTx() {
@@ -431,7 +495,20 @@ class Component extends React.Component {
     if (!f.desc || !f.desc.trim()) return this.toast('Escreve uma descrição', 'err');
     if (!f.value || f.value <= 0) return this.toast('Coloca o valor', 'err');
     if (!f.date) return this.toast('Escolhe a data', 'err');
-    const clean = o => { const c = { ...o }; delete c.more; if (c.payMethod !== 'Cartão') c.card = ''; if (!c.dueDate) c.dueDate = c.date; return c; };
+    const me = this.me, outro = this.otherUser();
+    const clean = o => {
+      const c = { ...o }; delete c.more;
+      if (c.payMethod !== 'Cartão') c.card = '';
+      if (!c.dueDate) c.dueDate = c.date;
+      // "de quem é" vira dono + visibilidade
+      const dono = c.dono; delete c.dono;
+      if (dono === 'other' && outro) { c.owner = outro.id; c.shared = true; c.split = false; }
+      else if (dono === 'split') { c.split = true; c.shared = false; c.owner = o.owner || (me || {}).id; }
+      else { c.split = false; c.shared = false; c.owner = (me || {}).id; }
+      if (!c.payerId) c.payerId = (me || {}).id || '';
+      delete c.payer;
+      return c;
+    };
     const data = { ...this.d, transactions: [...this.d.transactions] };
     if (this.state.modal.mode === 'edit') {
       const i = data.transactions.findIndex(t => t.id === f.id);
@@ -686,7 +763,7 @@ class Component extends React.Component {
     if (s.search.trim()) { const q = s.search.toLowerCase(); tx = tx.filter(t => (t.desc || '').toLowerCase().includes(q) || this.catName(t.category).toLowerCase().includes(q) || (t.notes || '').toLowerCase().includes(q) || (t.tags || []).join(' ').toLowerCase().includes(q)); }
     tx.sort((a, b) => (b.dueDate || b.date).localeCompare(a.dueDate || a.date));
     const ent = tx.filter(t => t.type === 'receita').reduce((a, t) => a + t.value, 0);
-    const sai = tx.filter(t => t.type === 'despesa').reduce((a, t) => a + t.value, 0);
+    const sai = tx.filter(t => t.type === 'despesa').reduce((a, t) => a + this.myShare(t), 0);
     const activeCard = s.source.startsWith('card:') ? this.card(s.source.slice(5)) : null;
 
     const sources = [['all', 'Tudo'], ['pix', 'Pix'], ['rec', 'Recorrentes'], ...this.d.cards.map(c => ['card:' + c.id, c.name]), ['outros', 'Outros']];
@@ -747,7 +824,9 @@ class Component extends React.Component {
           t.card ? h('span', { style: { ...tagStyle, background: (this.card(t.card) || {}).color + '22', color: (this.card(t.card) || {}).color } }, (this.card(t.card) || {}).name)
             : h('span', { style: { ...tagStyle, background: 'rgba(70,76,86,.1)', color: 'var(--muted)' } }, t.payMethod || '—'),
           t.recurring && h('span', { style: { ...tagStyle, background: 'var(--pink-soft)', color: 'var(--pink-deep)' } }, '↻ ' + t.recurring),
-          this.isDone(t) && h('span', { style: { ...tagStyle, background: 'var(--pos-bg)', color: 'var(--pos)' } }, rec ? 'recebido' : 'pago'))),
+          this.isDone(t) && h('span', { style: { ...tagStyle, background: 'var(--pos-bg)', color: 'var(--pos)' } }, rec ? 'recebido' : 'pago'),
+          this.isForOther(t) && h('span', { style: { ...tagStyle, background: 'rgba(142,92,134,.16)', color: 'var(--plum)' } }, 'de ' + this.ownerName(t)),
+          t.split && h('span', { style: { ...tagStyle, background: 'rgba(142,92,134,.16)', color: 'var(--plum)' } }, '÷ dividida'))),
       this.valueCell(t, rec, false),
       h('div', { style: { display: 'flex', gap: '2px' } },
         h('button', { title: 'Editar', onClick: () => this.openTx('edit', t), style: this.iconBtn() }, this.ico('M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', 16)),
@@ -829,7 +908,7 @@ class Component extends React.Component {
       (acerto.receber > 0 || acerto.pagar > 0) && h('div', { style: this.glass({ padding: '18px 22px', display: 'flex', gap: '18px', flexWrap: 'wrap', alignItems: 'center', borderLeft: '4px solid var(--plum)' }) },
         h('div', { style: { flex: '1 1 200px' } },
           h('div', { style: this.disp({ fontSize: '1rem' }) }, 'Acerto com ' + this.partner()),
-          h('div', { style: { fontSize: '.78rem', color: 'var(--muted)' } }, 'referente às despesas divididas deste mês')),
+          h('div', { style: { fontSize: '.78rem', color: 'var(--muted)' } }, 'o que vocês pagaram um pelo outro neste mês')),
         h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap' } },
           h('div', { style: { padding: '10px 16px', borderRadius: '16px', background: 'var(--pos-bg)' } },
             h('div', { style: { fontSize: '.72rem', color: 'var(--muted)', fontWeight: 700 } }, 'A receber dele'),
@@ -863,14 +942,14 @@ class Component extends React.Component {
   mensalCartoes(month) {
     if (this.d.cards.length === 0) return this.empty('Nenhum cartão', 'Cadastre seus cartões em Configurações para lançar as compras da fatura aqui.', h('button', { onClick: () => this.setState({ view: 'config' }), style: this.btn('primary') }, 'Ir para Configurações'), 'queen-card');
     return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } }, ...this.d.cards.map(c => {
-      const compras = this.d.transactions.filter(t => t.card === c.id && t.type === 'despesa' && mk(t.dueDate || t.date) === month).sort((a, b) => (a.dueDate || a.date).localeCompare(b.dueDate || b.date));
+      const compras = this.comprasDaFatura(c, month);
       const total = compras.reduce((a, t) => a + t.value, 0);
       const minha = compras.reduce((a, t) => a + this.myShare(t), 0);
       return h('div', { key: c.id, style: this.glass({ padding: '0', overflow: 'hidden' }) },
         h('div', { style: { padding: '18px 22px', background: `linear-gradient(135deg,${c.color},${c.color}cc)`, color: '#fff', display: 'flex', flexWrap: 'wrap', gap: '14px', alignItems: 'center' } },
           h('div', { style: { flex: '1 1 190px' } },
             h('div', { style: this.disp({ fontSize: '1.05rem' }) }, c.name),
-            h('div', { style: { fontSize: '.75rem', opacity: .88 } }, `Fatura de ${mkLong(month)} • vence dia ${c.dueDay}`)),
+            h('div', { style: { fontSize: '.75rem', opacity: .88 } }, `Fecha ${isoBR(this.faturaClose(c, month))} • vence ${isoBR(this.faturaDue(c, this.faturaClose(c, month)))}`)),
           h('div', { style: { textAlign: 'right' } },
             h('div', { style: { fontSize: '.72rem', opacity: .88 } }, 'Total da fatura'),
             h('div', { style: this.disp({ fontSize: '1.4rem' }) }, this.m(fmt(total))),
@@ -890,19 +969,23 @@ class Component extends React.Component {
       h('div', { style: { flex: '1 1 150px', minWidth: 0 } },
         h('div', { style: { fontWeight: 600, fontSize: '.84rem', textWrap: 'pretty' } }, t.desc,
           t.installments > 1 && h('span', { style: { color: 'var(--muted)', fontWeight: 400, fontSize: '.73rem' } }, `  ${t.installment}/${t.installments}`)),
-        split && h('div', { style: { fontSize: '.72rem', color: 'var(--plum)', fontWeight: 700 } }, `dividido • sua parte ${this.m(fmt(t.value / 2))} • ${this.paidByMe(t) ? this.partner() + ' te deve' : 'você deve a ' + this.partner()}`)),
+        split && h('div', { style: { fontSize: '.72rem', color: 'var(--plum)', fontWeight: 700 } }, `dividido • sua parte ${this.m(fmt(t.value / 2))} • ${this.paidByMe(t) ? this.partner() + ' te deve' : 'você deve a ' + this.partner()}`),
+        this.isForOther(t) && h('div', { style: { fontSize: '.72rem', color: 'var(--plum)', fontWeight: 700 } }, `conta de ${this.ownerName(t)}${this.credit(t) > 0 ? ' • ele(a) te deve ' + this.m(fmt(this.credit(t))) : ''}`)),
       h('button', { title: split ? 'Dividido — clique para desfazer' : `Dividir com ${this.partner()}`, onClick: () => this.toggleSplit(t), style: { padding: '5px 11px', borderRadius: '999px', border: split ? 'none' : '1px solid var(--stroke)', background: split ? 'var(--plum)' : 'transparent', color: split ? '#fff' : 'var(--muted)', fontWeight: 700, fontSize: '.72rem', cursor: 'pointer', flexShrink: 0 } }, '÷ 50%'),
       this.valueCell(t, false, true),
       h('button', { title: 'Editar', onClick: () => this.openTx('edit', t), style: this.iconBtn() }, this.ico('M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', 14)),
       h('button', { title: 'Excluir', onClick: () => this.delTx(t.id), style: this.iconBtn('var(--neg)') }, this.ico('M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14', 14)));
   }
   toggleSplit(t) {
-    const data = { ...this.d, transactions: this.d.transactions.map(x => x.id === t.id ? { ...x, split: !x.split, payer: x.payer || 'eu' } : x) };
+    const data = { ...this.d, transactions: this.d.transactions.map(x => x.id === t.id ? { ...x, split: !x.split, payerId: this.payerOf(x) } : x) };
     this.save(data, () => this.toast(t.split ? 'Divisão removida' : 'Dividido 50/50'));
   }
   openCardBuy(c, month) {
     this.openTx('add');
-    setTimeout(() => this.setF({ type: 'despesa', payMethod: 'Cartão', card: c.id, date: month + '-' + todayISO().slice(8), dueDate: month + '-' + todayISO().slice(8), status: 'pendente', more: true }), 0);
+    const hoje = todayISO(), fecha = this.faturaClose(c, month);
+    // se hoje já cai nesta fatura, usa hoje; senão, o último dia que ainda entra nela
+    const dia = mk(this.faturaDue(c, hoje)) === month ? hoje : fecha;
+    setTimeout(() => this.setF({ type: 'despesa', payMethod: 'Cartão', card: c.id, date: dia, dueDate: dia, status: 'pendente', more: true }), 0);
   }
   stat(label, v, color) { return h('div', { style: this.glass({ padding: '14px 16px', borderLeft: '3px solid ' + (color || 'var(--pink)') }) }, h('div', { style: { fontSize: '.7rem', color: 'var(--muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.05em' } }, label), h('div', { style: this.disp({ fontSize: 'clamp(1.1rem,2vw,1.35rem)', color }) }, this.m(fmt(v)))); }
   monthRow(i, today) {
@@ -920,7 +1003,9 @@ class Component extends React.Component {
           i.isFatura && h('span', { style: { color: 'var(--muted)', fontWeight: 400, fontSize: '.72rem' } }, `  ${i.count} compras`),
           i.isRec && h('span', { style: { color: 'var(--pink-deep)', fontWeight: 700, fontSize: '.72rem' } }, '  ↻'),
           i.installments > 1 && h('span', { style: { color: 'var(--muted)', fontWeight: 400, fontSize: '.72rem' } }, `  ${i.installment}/${i.installments}`)),
-        i.split && h('div', { style: { fontSize: '.71rem', color: 'var(--plum)', fontWeight: 700 } }, `÷ sua parte ${this.m(fmt(this.myShare(i)))}${this.credit(i) > 0 ? ' • a receber ' + this.m(fmt(this.credit(i))) : ''}${this.debt(i) > 0 ? ' • você deve ' + this.m(fmt(this.debt(i))) : ''}`)),
+        i.split && h('div', { style: { fontSize: '.71rem', color: 'var(--plum)', fontWeight: 700 } }, `÷ sua parte ${this.m(fmt(this.myShare(i)))}${this.credit(i) > 0 ? ' • a receber ' + this.m(fmt(this.credit(i))) : ''}${this.debt(i) > 0 ? ' • você deve ' + this.m(fmt(this.debt(i))) : ''}`),
+        this.isForOther(i) && h('div', { style: { fontSize: '.71rem', color: 'var(--plum)', fontWeight: 700 } }, `conta de ${this.ownerName(i)}${this.credit(i) > 0 ? ' • ele(a) te deve ' + this.m(fmt(this.credit(i))) : ''}`),
+        !i.split && !this.isForOther(i) && this.debt(i) > 0 && h('div', { style: { fontSize: '.71rem', color: 'var(--plum)', fontWeight: 700 } }, `${this.partner()} pagou • você deve ${this.m(fmt(this.debt(i)))}`)),
       this.valueCell(i, isRec, true),
       i.isFatura ? h('button', { title: 'Ver compras deste cartão', onClick: () => this.setState({ view: 'lancamentos', source: 'card:' + i.cardRef.id }), style: this.iconBtn() }, this.ico('M2 6h20v12H2zM2 10h20', 14))
         : i.isRec ? h('span', { style: { width: '32px' } })
@@ -1073,7 +1158,7 @@ class Component extends React.Component {
           h('button', { onClick: () => this.setState({ modal: { type: 'pw' }, form: {} }), style: this.btn('soft', { fontSize: '.83rem' }) }, 'Trocar senha'),
           h('button', { onClick: () => this.logout(), style: this.btn('ghost', { fontSize: '.83rem' }) }, 'Sair')),
         h('div', { style: { marginTop: '14px', padding: '13px 15px', borderRadius: '16px', background: 'var(--pink-soft)', color: 'var(--pink-deep)', fontSize: '.83rem', lineHeight: 1.5 } },
-          other ? `Lançamentos marcados como divididos com ${other.name} aparecem para vocês dois — o resto é só seu.` : 'Para dividir despesas com outra pessoa, crie o segundo usuário no painel do Supabase (Authentication › Users) — ele aparece aqui sozinho. Depois, o que for marcado como dividido aparece para vocês dois.'),
+          other ? `Ao lançar uma despesa você escolhe de quem ela é: sua, de ${other.name} (aparece para os dois, mas não entra nas suas contas) ou dividida 50/50. Quem pagou o quê vai para o acerto.` : 'Para dividir despesas com outra pessoa, crie o segundo usuário no painel do Supabase (Authentication › Users) — ele aparece aqui sozinho. Depois, o que for marcado como dividido aparece para vocês dois.'),
         other && h('div', { style: { marginTop: '12px', display: 'flex', alignItems: 'center', gap: '12px', padding: '11px 14px', borderRadius: '10px', border: '1px solid var(--stroke)', flexWrap: 'wrap' } },
           h('div', { style: { width: '34px', height: '34px', borderRadius: '50%', background: 'var(--pink-soft)', color: 'var(--pink-deep)', display: 'grid', placeItems: 'center', fontWeight: 700, fontSize: '.85rem' } }, (other.name || '?').slice(0, 1).toUpperCase()),
           h('div', { style: { flex: 1, minWidth: '120px' } },
@@ -1243,7 +1328,7 @@ class Component extends React.Component {
     const rows = (this.state.form.rows || []).filter(r => r.include && r.value > 0);
     if (!rows.length) return this.toast('Nenhum item selecionado', 'err');
     const defCat = (this.d.categories[0] || {}).id || '';
-    const add = rows.map(r => ({ id: uid(), desc: r.desc, value: r.value, type: 'despesa', category: r.category || defCat, date: r.date || todayISO(), dueDate: r.date || todayISO(), card: card.id, account: card.payAccount || '', payMethod: 'Cartão', status: 'pendente', installment: r.installment || '', installments: r.installments || '', split: !!r.split, payer: 'eu', tags: ['fatura'], notes: '', subcategory: '' }));
+    const add = rows.map(r => ({ id: uid(), desc: r.desc, value: r.value, type: 'despesa', category: r.category || defCat, date: r.date || todayISO(), dueDate: r.date || todayISO(), card: card.id, account: card.payAccount || '', payMethod: 'Cartão', status: 'pendente', installment: r.installment || '', installments: r.installments || '', split: !!r.split, payerId: (this.me || {}).id || '', tags: ['fatura'], notes: '', subcategory: '' }));
     this.save({ ...this.d, transactions: [...this.d.transactions, ...add] }, () => this.toast(`${add.length} lançamentos importados`));
     this.setState({ modal: null });
   }
@@ -1345,6 +1430,13 @@ class Component extends React.Component {
       [cancel, h('button', { onClick: () => this.saveCat(), style: this.btn('primary') }, 'Salvar')]);
     return null;
   }
+  formPagouEu(f) { const eu = (this.me || {}).id || ''; return (f.payerId || eu) === eu; }
+  resumoDivisao(f) {
+    const pagouEu = this.formPagouEu(f), p = this.partner(), v = f.value || 0;
+    if (f.dono === 'split') return `Sua parte: ${fmt(v / 2)} • ${pagouEu ? p + ' te deve ' + fmt(v / 2) : 'você deve ' + fmt(v / 2) + ' a ' + p}`;
+    if (f.dono === 'other') return `Não entra nas suas contas — é de ${p}` + (pagouEu ? ` • ${p} te deve ${fmt(v)}` : '');
+    return pagouEu ? '' : `${p} pagou por você • você deve ${fmt(v)} a ${p}`;
+  }
   txModal(f, cancel) {
     const isRec = f.type === 'receita';
     return this.shell(this.state.modal.mode === 'edit' ? 'Editar lançamento' : 'Novo lançamento',
@@ -1374,17 +1466,18 @@ class Component extends React.Component {
           h('div', { style: { width: '46px', height: '27px', borderRadius: '999px', background: this.isDone(f) ? 'var(--pos)' : 'rgba(70,76,86,.22)', position: 'relative', transition: 'background .2s' } },
             h('div', { style: { width: '21px', height: '21px', borderRadius: '50%', background: '#fff', position: 'absolute', top: '3px', left: this.isDone(f) ? '22px' : '3px', transition: 'left .2s', boxShadow: '0 2px 5px rgba(0,0,0,.2)' } })),
           h('span', { style: { fontSize: '.9rem', fontWeight: 600 } }, isRec ? 'Já recebi' : 'Já paguei')),
-        // dividir com o parceiro
-        f.type === 'despesa' && h('div', { style: { padding: '13px 15px', borderRadius: '18px', background: f.split ? 'rgba(142,92,134,.12)' : 'transparent', border: '1px solid var(--stroke)', display: 'flex', flexDirection: 'column', gap: '11px' } },
-          h('button', { onClick: () => this.setF({ split: !f.split, payer: f.payer || 'eu' }), style: { display: 'flex', alignItems: 'center', gap: '11px', border: 'none', background: 'transparent', cursor: 'pointer', color: 'var(--ink)', padding: 0 } },
-            h('div', { style: { width: '46px', height: '27px', borderRadius: '999px', background: f.split ? 'var(--plum)' : 'rgba(70,76,86,.22)', position: 'relative', transition: 'background .2s' } },
-              h('div', { style: { width: '21px', height: '21px', borderRadius: '50%', background: '#fff', position: 'absolute', top: '3px', left: f.split ? '22px' : '3px', transition: 'left .2s', boxShadow: '0 2px 5px rgba(0,0,0,.2)' } })),
-            h('span', { style: { fontSize: '.9rem', fontWeight: 600 } }, 'Dividir 50/50 com ' + this.partner())),
-          f.split && h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap', alignItems: 'center' } },
+        // de quem é a conta
+        f.type === 'despesa' && this.otherUser() && h('div', { style: { padding: '13px 15px', borderRadius: '18px', background: (f.dono || 'me') !== 'me' ? 'rgba(142,92,134,.12)' : 'transparent', border: '1px solid var(--stroke)', display: 'flex', flexDirection: 'column', gap: '11px' } },
+          h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap', alignItems: 'center' } },
+            h('span', { style: { fontSize: '.78rem', fontWeight: 700, color: 'var(--muted)' } }, 'De quem é?'),
+            this.chip('Minha', (f.dono || 'me') === 'me', () => this.setF({ dono: 'me' }), 'var(--plum)'),
+            this.chip('De ' + this.partner(), f.dono === 'other', () => this.setF({ dono: 'other' }), 'var(--plum)'),
+            this.chip('Dividida 50/50', f.dono === 'split', () => this.setF({ dono: 'split' }), 'var(--plum)')),
+          h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap', alignItems: 'center' } },
             h('span', { style: { fontSize: '.78rem', fontWeight: 700, color: 'var(--muted)' } }, 'Quem pagou?'),
-            this.chip('Eu paguei', (f.payer || 'eu') === 'eu', () => this.setF({ payer: 'eu' }), 'var(--plum)'),
-            this.chip(this.partner() + ' pagou', f.payer === 'parceiro', () => this.setF({ payer: 'parceiro' }), 'var(--plum)')),
-          f.split && f.value > 0 && h('div', { style: { fontSize: '.79rem', color: 'var(--plum)', fontWeight: 700 } }, `Sua parte: ${fmt(f.value / 2)} • ${(f.payer || 'eu') === 'eu' ? this.partner() + ' te deve ' + fmt(f.value / 2) : 'você deve ' + fmt(f.value / 2) + ' a ' + this.partner()}`)),
+            this.chip('Eu paguei', this.formPagouEu(f), () => this.setF({ payerId: (this.me || {}).id || '' }), 'var(--plum)'),
+            this.chip(this.partner() + ' pagou', !this.formPagouEu(f), () => this.setF({ payerId: (this.otherUser() || {}).id || '' }), 'var(--plum)')),
+          f.value > 0 && this.resumoDivisao(f) && h('div', { style: { fontSize: '.79rem', color: 'var(--plum)', fontWeight: 700, lineHeight: 1.45 } }, this.resumoDivisao(f))),
         // mais detalhes
         h('button', { onClick: () => this.setF({ more: !f.more }), style: { display: 'flex', alignItems: 'center', gap: '8px', border: 'none', background: 'transparent', color: 'var(--pink-deep)', cursor: 'pointer', fontWeight: 700, fontSize: '.86rem', padding: 0 } }, this.ico(f.more ? 'M18 15l-6-6-6 6' : 'M6 9l6 6 6-6', 16), f.more ? 'Menos detalhes' : 'Mais detalhes'),
         f.more && h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px', borderTop: '1px solid var(--stroke)', paddingTop: '14px' } },
