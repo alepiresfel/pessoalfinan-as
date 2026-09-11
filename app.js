@@ -214,7 +214,7 @@ class Component extends React.Component {
     const me = this.me; if (!me) return '';
     if (t.card) {                                  // compra no cartão: quem paga a fatura é o dono do cartão
       const c = this.card(t.card);
-      if (c) return c._foreign ? ((this.otherUser() || {}).id || '') : me.id;
+      if (c) return this.cartaoMeu(c) ? me.id : ((this.otherUser() || {}).id || '');
     }
     if (t.payerId) return t.payerId;
     const criador = t.owner || me.id;
@@ -468,13 +468,16 @@ class Component extends React.Component {
       .filter(t => t.card === card.id && t.type === 'despesa' && this.faturaMesDe(t) === monthKey)
       .sort((a, b) => (a.dueDate || a.date).localeCompare(b.dueDate || b.date));
   }
-  meusCartoes() { return (this.d.cards || []).filter(c => !c._foreign); }
+  /* Cartão é meu quando não tem dono ou o dono sou eu — mesmo que esteja
+     compartilhado para os dois enxergarem o limite. */
+  cartaoMeu(c) { const me = this.me; return !!c && !c._foreign && (!c.owner || !me || c.owner === me.id); }
+  meusCartoes() { return (this.d.cards || []).filter(c => this.cartaoMeu(c)); }
   /* O cartão do parceiro não é assunto meu: mostro só que foi no cartão dele. */
   origemLabel(t) {
     if (!t.card) return t.payMethod || '';
     const c = this.card(t.card);
     if (!c) return t.payMethod || '';
-    return c._foreign ? 'cartão de ' + this.partner().split(' ')[0] : c.name;
+    return this.cartaoMeu(c) ? c.name : 'cartão de ' + this.partner().split(' ')[0];
   }
   realTx(i) { return (i && i._srcId) ? (this.d.transactions.find(t => t.id === i._srcId) || i) : i; }
   /* Compras no cartão do parceiro que me dizem respeito: entram como linha
@@ -483,7 +486,7 @@ class Component extends React.Component {
     return this.d.transactions.filter(t => {
       if (!t.card || t.type !== 'despesa') return false;
       const c = this.card(t.card);
-      return !!(c && c._foreign && this.faturaMesDe(t) === month);
+      return !!(c && !this.cartaoMeu(c) && this.faturaMesDe(t) === month);
     }).map(t => {
       const c = this.card(t.card);
       const venc = this.vencFatura(c, this.faturaMesDe(t));
@@ -504,7 +507,7 @@ class Component extends React.Component {
   faturas(extras) {
     const groups = {};
     [...this.d.transactions, ...(extras || [])].filter(t => t.type === 'despesa' && t.card).forEach(t => {
-      const c = this.card(t.card); if (!c || c._foreign) return;
+      const c = this.card(t.card); if (!c || !this.cartaoMeu(c)) return;
       const mes = this.faturaMesDe(t);
       const k = t.card + '|' + mes;
       (groups[k] = groups[k] || { card: c, key: mes, due: this.vencFatura(c, mes), txs: [] }).txs.push(t);
@@ -1012,6 +1015,7 @@ class Component extends React.Component {
   /* Vale-benefício (Flash e afins): saldo da empresa, não é renda nem gasto.
      Marque a conta ou o cartão como benefício em Configurações. */
   ehBeneficio(t) {
+    if (t.isRepasse) return false;
     if (t.isFatura) return !!(t.cardRef && t.cardRef.beneficio);
     if (t.card) { const c = this.card(t.card); if (c && c.beneficio) return true; }
     if (t.account) { const a = this.acc(t.account); if (a && a.beneficio) return true; }
@@ -1124,7 +1128,7 @@ class Component extends React.Component {
   }
   viewDashboard() {
     const st = this.state, { from, to, label } = this.periodRange();
-    const items = this.rangeItems(from, to).filter(i => !this.ehBeneficio(i));
+    const items = this.rangeItems(from, to).filter(i => !this.ehBeneficio(i) && !i.isRepasse);
     const today = todayISO();
     const sai = items.filter(i => i.type === 'despesa'), ent = items.filter(i => i.type === 'receita');
     const quem = this.state.visao || 'eu';
@@ -1339,6 +1343,30 @@ class Component extends React.Component {
         () => this.toast(q === '1' ? 'Movido para a 1ª quinzena' : 'Movido para a 2ª quinzena'));
     }
   }
+  /* O que você deve a ele naquele conjunto de contas, como uma linha só. */
+  repasseDe(lista, chave) {
+    const outro = this.otherUser(); if (!outro) return null;
+    const compoem = lista.filter(i => !i.isRepasse && this.debt(i) > 0);
+    const total = c2(compoem.reduce((a, i) => a + this.debt(i), 0));
+    if (total <= 0) return null;
+    const pagos = (this.d.meta && this.d.meta.repassePago) || {};
+    return {
+      id: 'repasse|' + chave, isRepasse: true, type: 'despesa',
+      desc: 'Repasse para ' + outro.name.split(' ')[0],
+      value: total, myValue: total, count: compoem.length, compoem,
+      status: pagos[chave] ? 'pago' : 'pendente', payMethod: 'Pix', category: '',
+      chaveRepasse: chave,
+    };
+  }
+  marcaRepasse(item) {
+    const chave = item.chaveRepasse;
+    const pagos = { ...((this.d.meta || {}).repassePago || {}) };
+    if (pagos[chave]) delete pagos[chave]; else pagos[chave] = todayISO();
+    this.save({ ...this.d, meta: { ...(this.d.meta || {}), repassePago: pagos } },
+      () => this.toast(pagos[chave] ? 'Repasse pago!' : 'Repasse reaberto', pagos[chave] ? 'ok' : 'warn'));
+  }
+  /* Contas que eu mesma pago; as que ele paga entram no repasse. */
+  minhasDeSaida(lista) { return lista.filter(i => i.type === 'despesa' && this.paidByMe(i)); }
   blocoQuinzenas() {
     const month = this.state.month, today = todayISO();
     const [d1, d2] = this.payDays();
@@ -1347,8 +1375,10 @@ class Component extends React.Component {
     const ult = new Date(+month.slice(0, 4), +month.slice(5), 0).getDate();
     const painel = (q, dia, ate) => {
       const lista = itens.filter(i => this.quinzenaDe(i) === q);
-      const ent = lista.filter(i => i.type === 'receita');
-      const sai = lista.filter(i => i.type === 'despesa').sort((a, b) => (a.dueDate || a.date).localeCompare(b.dueDate || b.date));
+      const ent = lista.filter(i => i.type === 'receita' && this.paidByMe(i));
+      const rep = this.repasseDe(lista, month + '|' + q);
+      const sai = this.minhasDeSaida(lista).sort((a, b) => (a.dueDate || a.date).localeCompare(b.dueDate || b.date));
+      if (rep) { rep.dueDate = `${month}-${String(Math.min(dia, ult)).padStart(2, '0')}`; sai.push(rep); }
       const totEnt = ent.reduce((a, i) => a + this.myShare(i), 0);
       const totSai = sai.reduce((a, i) => a + this.myShare(i), 0);
       const pago = sai.filter(i => this.isDone(i)).reduce((a, i) => a + this.myShare(i), 0);
@@ -1528,8 +1558,10 @@ class Component extends React.Component {
   blocoMes() {
     const month = this.state.month;
     const items = this.monthItems(month);
-    const ent = items.filter(i => i.type === 'receita');
-    const sai = items.filter(i => i.type === 'despesa');
+    const ent = items.filter(i => i.type === 'receita' && this.paidByMe(i));
+    const sai = this.minhasDeSaida(items);
+    const rep = this.repasseDe(items, month + '|mes');
+    if (rep) { rep.dueDate = month + '-' + String(Math.min(this.payDays()[1], new Date(+month.slice(0, 4), +month.slice(5), 0).getDate())).padStart(2, '0'); sai.push(rep); }
     const totEnt = ent.reduce((a, i) => a + this.myShare(i), 0);
     const totSai = sai.reduce((a, i) => a + this.myShare(i), 0);
     const pagoSai = sai.filter(i => this.isDone(i)).reduce((a, i) => a + this.myShare(i), 0);
@@ -1648,13 +1680,14 @@ class Component extends React.Component {
     const late = !done && dd < 0;
     const isRec = i.type === 'receita';
     return h('div', { key: i.id, style: { display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 12px', borderRadius: '14px', opacity: done ? .6 : 1 } },
-      h('button', { title: done ? 'Desmarcar' : 'Marcar como ' + (isRec ? 'recebido' : 'pago'), onClick: () => this.toggleDone(i), style: { width: '26px', height: '26px', flexShrink: 0, borderRadius: '9px', cursor: 'pointer', border: done ? 'none' : `2px solid ${late ? 'var(--neg)' : 'var(--stroke)'}`, background: done ? 'var(--pos)' : 'transparent', color: '#fff', display: 'grid', placeItems: 'center' } }, done && this.ico('M20 6L9 17l-5-5', 15)),
+      h('button', { title: done ? 'Desmarcar' : 'Marcar como ' + (isRec ? 'recebido' : 'pago'), onClick: () => i.isRepasse ? this.marcaRepasse(i) : this.toggleDone(i), style: { width: '26px', height: '26px', flexShrink: 0, borderRadius: '9px', cursor: 'pointer', border: done ? 'none' : `2px solid ${late ? 'var(--neg)' : 'var(--stroke)'}`, background: done ? 'var(--pos)' : 'transparent', color: '#fff', display: 'grid', placeItems: 'center' } }, done && this.ico('M20 6L9 17l-5-5', 15)),
       h('span', { style: { width: '34px', flexShrink: 0, fontSize: '.74rem', fontWeight: 700, color: late ? 'var(--neg)' : 'var(--muted)', textAlign: 'center' } }, isoBR(i.dueDate || i.date).slice(0, 5)),
       h('div', { style: { width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0, background: i.isFatura ? i.cardRef.color : this.catColor(i.category) } }),
       h('div', { style: { flex: 1, minWidth: 0 } },
         h('div', { style: { fontWeight: 600, fontSize: '.83rem', lineHeight: 1.3, textDecoration: done ? 'line-through' : 'none', textWrap: 'pretty' } },
           i.isFatura ? i.desc : i.desc,
           i.isFatura && h('span', { style: { color: 'var(--muted)', fontWeight: 400, fontSize: '.72rem' } }, `  ${i.count} compra${i.count > 1 ? 's' : ''} • fatura inteira`),
+          i.isRepasse && h('span', { style: { color: 'var(--muted)', fontWeight: 400, fontSize: '.72rem' } }, `  ${i.count} conta${i.count > 1 ? 's' : ''} dele`),
           i.isRec && h('span', { style: { color: 'var(--pink-deep)', fontWeight: 700, fontSize: '.72rem' } }, '  ↻'),
           i.installments > 1 && h('span', { style: { color: 'var(--muted)', fontWeight: 400, fontSize: '.72rem' } }, `  ${i.installment}/${i.installments}`)),
         !i.isFatura && i.split && h('div', { style: { fontSize: '.71rem', color: 'var(--plum)', fontWeight: 700 } }, `÷ sua parte ${this.m(fmt(this.myShare(i)))}${this.credit(i) > 0 ? ' • a receber ' + this.m(fmt(this.credit(i))) : ''}${this.debt(i) > 0 ? ' • você deve ' + this.m(fmt(this.debt(i))) : ''}`),
@@ -1663,6 +1696,7 @@ class Component extends React.Component {
         !i.split && !this.isForOther(i) && this.debt(i) > 0 && h('div', { style: { fontSize: '.71rem', color: 'var(--plum)', fontWeight: 700 } }, `${this.partner()} pagou • você deve ${this.m(fmt(this.debt(i)))}`)),
       this.valueCell(i, isRec, true),
       quinzena && h('button', { title: quinzena === '1' ? 'Mover para a 2ª quinzena (dia ' + this.payDays()[1] + ')' : 'Mover para a 1ª quinzena (dia ' + this.payDays()[0] + ')', onClick: () => this.setQuinzena(i, quinzena === '1' ? '2' : '1'), style: { padding: '4px 9px', borderRadius: '999px', border: '1px solid var(--stroke)', background: 'transparent', color: 'var(--muted)', fontWeight: 700, fontSize: '.68rem', cursor: 'pointer', flexShrink: 0 } }, quinzena === '1' ? '→ 2ª' : '← 1ª'),
+      i.isRepasse ? h('button', { title: 'Ver o que compõe este repasse', onClick: () => this.setState({ modal: { type: 'repasse', payload: i } }), style: this.iconBtn() }, this.ico('M12 8h.01M11 12h1v4h1M12 3a9 9 0 100 18 9 9 0 000-18z', 14)) :
       i.isFatura ? h('button', { title: 'Ver compras deste cartão', onClick: () => this.setState({ view: 'lancamentos', source: 'card:' + i.cardRef.id }), style: this.iconBtn() }, this.ico('M2 6h20v12H2zM2 10h20', 14))
         : i.isRec ? h('span', { style: { width: '32px' } })
           : h('button', { title: 'Editar', onClick: () => this.openTx('edit', i), style: this.iconBtn() }, this.ico('M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', 14)));
@@ -2152,6 +2186,21 @@ class Component extends React.Component {
         this.field('Nova senha', h('input', { type: 'password', value: f.pass || '', onChange: e => this.setF({ pass: e.target.value }), style: this.inp() })),
         this.field('Repita a nova senha', h('input', { type: 'password', value: f.pass2 || '', onChange: e => this.setF({ pass2: e.target.value }), style: this.inp() }))),
       [cancel, h('button', { onClick: () => this.changePw(), style: this.btn('primary') }, 'Salvar')]);
+    if (M.type === 'repasse') {
+      const it = M.payload;
+      return this.shell(it.desc,
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '4px' } },
+          h('p', { style: { fontSize: '.84rem', color: 'var(--muted)', lineHeight: 1.5, marginBottom: '10px' } },
+            'Contas que ' + this.partner().split(' ')[0] + ' pagou e nas quais você tem parte. Some numa linha só para você não pagar duas vezes.'),
+          ...it.compoem.map(x => h('div', { key: x.id, style: { display: 'flex', justifyContent: 'space-between', gap: '12px', padding: '9px 0', borderBottom: '1px solid var(--stroke)' } },
+            h('div', { style: { minWidth: 0 } },
+              h('div', { style: { fontWeight: 600, fontSize: '.88rem' } }, x.desc),
+              h('div', { style: { fontSize: '.73rem', color: 'var(--muted)' } }, isoBR(x.dueDate || x.date) + (x.split ? ' • dividida' : '') + (this.origemLabel(x) ? ' • ' + this.origemLabel(x) : ''))),
+            h('span', { style: { fontWeight: 700, whiteSpace: 'nowrap' } }, this.m(fmt(this.debt(x)))))),
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', paddingTop: '12px', fontWeight: 700 } },
+            h('span', null, 'Total a repassar'), h('span', { style: { color: 'var(--neg)' } }, this.m(fmt(it.value))))),
+        [h('button', { onClick: () => this.setState({ modal: null }), style: this.btn('ghost') }, 'Fechar')]);
+    }
     if (M.type === 'inv') return this.shell(M.mode === 'edit' ? 'Editar investimento' : 'Novo investimento',
       h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
         h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
@@ -2194,6 +2243,9 @@ class Component extends React.Component {
         h('div', { style: { display: 'flex', gap: '12px' } }, this.field('Fecha dia', h('input', { type: 'number', min: 1, max: 31, value: f.closeDay, onChange: e => this.setF({ closeDay: +e.target.value }), style: this.inp() })), this.field('Vence dia', h('input', { type: 'number', min: 1, max: 31, value: f.dueDay, onChange: e => this.setF({ dueDay: +e.target.value }), style: this.inp() }))),
         this.field('Conta de pagamento', h('select', { value: f.payAccount, onChange: e => this.setF({ payAccount: e.target.value }), style: this.inp() }, h('option', { value: '' }, '—'), ...this.d.accounts.map(a => h('option', { key: a.id, value: a.id }, a.name)))),
         this.field('Cor', this.colors(f.color, c => this.setF({ color: c }))),
+        this.otherUser() && this.field('De quem é este cartão?', h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap' } },
+          this.chip('Meu', !f.owner || f.owner === (this.me || {}).id, () => this.setF({ owner: (this.me || {}).id, shared: false }), 'var(--plum)'),
+          this.chip('De ' + this.partner().split(' ')[0], f.owner === (this.otherUser() || {}).id, () => this.setF({ owner: (this.otherUser() || {}).id, shared: true }), 'var(--plum)'))),
         this.beneficioField(f),
         this.sharedField(f)),
       [cancel, h('button', { onClick: () => this.saveCard(), style: this.btn('primary') }, 'Salvar')]);
