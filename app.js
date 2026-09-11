@@ -990,12 +990,145 @@ class Component extends React.Component {
   }
 
   /* ---------- 0. PAINEL ---------- */
+  /* ---------- A QUEM PERTENCE A DESPESA ---------- */
+  /* Cash (o que sai da conta) é uma coisa; gasto (a quem a despesa pertence)
+     é outra. `myShare` responde a primeira; `parteDe` responde a segunda. */
+  parteDe(t, quem) {
+    const me = this.me || {}, outro = this.otherUser() || {};
+    const id = quem === 'parceiro' ? outro.id : me.id;
+    if (t.isFatura) {
+      if (quem === 'casal') return c2(t.value);
+      return quem === 'parceiro' ? c2(t.value - t.myValue) : c2(t.myValue);
+    }
+    if (quem === 'casal') return c2(t.value);
+    if (t.split) {
+      const cent = Math.round((t.value || 0) * 100), cima = Math.ceil(cent / 2);
+      const dono = t.owner || me.id;
+      return ((dono === id) ? cima : cent - cima) / 100;
+    }
+    const dono = t.owner || me.id;
+    return dono === id ? c2(t.value) : 0;
+  }
+  /* Vale-benefício (Flash e afins): saldo da empresa, não é renda nem gasto.
+     Marque a conta ou o cartão como benefício em Configurações. */
+  ehBeneficio(t) {
+    if (t.isFatura) return !!(t.cardRef && t.cardRef.beneficio);
+    if (t.card) { const c = this.card(t.card); if (c && c.beneficio) return true; }
+    if (t.account) { const a = this.acc(t.account); if (a && a.beneficio) return true; }
+    return false;
+  }
+  /* Lançamentos do período com as faturas abertas em compras, para saber
+     de quem é cada real — e não só quanto o cartão cobrou. */
+  itensDetalhados(from, to) {
+    const vistos = new Set(), out = [];
+    const guarda = (t, venc) => { if (!t || vistos.has(t.id)) return; vistos.add(t.id); out.push({ ...t, _venc: venc }); };
+    this.monthKeysBetween(from, to).forEach(k => {
+      this.d.transactions.filter(t => !t.card && mk(t.dueDate || t.date) === k).forEach(t => guarda(t, t.dueDate || t.date));
+      this.recFor(k).forEach(r => guarda(r, r.dueDate || r.date));
+      (this.d.cards || []).forEach(c => this.comprasDaFatura(c, k).forEach(t => guarda(t, this.vencFatura(c, k))));
+    });
+    return out.filter(x => x._venc >= from && x._venc <= to);
+  }
+  fechamento(from, to, quem) {
+    const itens = this.itensDetalhados(from, to);
+    const uteis = itens.filter(i => !this.ehBeneficio(i));
+    const parte = i => this.parteDe(i, quem);
+    const receitas = uteis.filter(i => i.type === 'receita').reduce((a, i) => a + parte(i), 0);
+    const desp = uteis.filter(i => i.type === 'despesa');
+    const baldes = [
+      { k: 'fixas', label: 'Contas fixas (sua parte)', v: 0, cor: 'var(--pink)' },
+      { k: 'cartoes', label: 'Cartões (sua parte)', v: 0, cor: 'var(--plum)' },
+      { k: 'casal', label: 'Despesas do casal (sua parte)', v: 0, cor: 'var(--coral)' },
+      { k: 'so', label: 'Só suas', v: 0, cor: 'var(--pink-deep)' },
+    ];
+    const põe = (k, v) => { const b = baldes.find(x => x.k === k); if (b) b.v = c2(b.v + v); };
+    desp.forEach(i => {
+      const v = parte(i); if (!v) return;
+      if (i.card) põe('cartoes', v);
+      else if (i.recurring || i.isRec || i.recSource) põe('fixas', v);
+      else if (i.split) põe('casal', v);
+      else põe('so', v);
+    });
+    const gastos = c2(baldes.reduce((a, b) => a + b.v, 0));
+    let receber = 0, pagar = 0;
+    if (quem !== 'casal') {
+      const me = this.me || {}, outro = this.otherUser() || {};
+      const eu = quem === 'parceiro' ? outro.id : me.id;
+      const ele = quem === 'parceiro' ? me.id : outro.id;
+      desp.forEach(i => {
+        const pagou = this.payerOf(i);
+        const minha = this.parteDe(i, quem);
+        const dele = quem === 'parceiro' ? this.parteDe(i, 'eu') : this.parteDe(i, 'parceiro');
+        if (pagou === eu && dele > 0) receber = c2(receber + dele);
+        if (pagou === ele && minha > 0) pagar = c2(pagar + minha);
+      });
+    }
+    const ben = itens.filter(i => this.ehBeneficio(i));
+    const benGasto = ben.filter(i => i.type === 'despesa').reduce((a, i) => a + this.parteDe(i, quem), 0);
+    const benEntrada = ben.filter(i => i.type === 'receita').reduce((a, i) => a + this.parteDe(i, quem), 0);
+    return {
+      receitas, gastos, baldes, receber, pagar, saldoAcerto: c2(receber - pagar),
+      sobra: c2(receitas - gastos), comprometido: receitas > 0 ? (gastos / receitas) * 100 : 0,
+      benGasto: c2(benGasto), benEntrada: c2(benEntrada), temBeneficio: ben.length > 0,
+    };
+  }
+  renderFechamento(from, to, label) {
+    const quem = this.state.visao || 'eu';
+    const outro = this.otherUser();
+    const f = this.fechamento(from, to, quem);
+    const nome = quem === 'parceiro' ? (outro || {}).name || 'Parceiro' : quem === 'casal' ? 'vocês dois' : 'você';
+    const primeiro = s => String(s || '').split(' ')[0];
+    const linha = (rot, val, cor, forte) => h('div', { key: rot, style: { display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '12px', padding: forte ? '10px 0 0' : '5px 0', borderTop: forte ? '1px solid var(--stroke)' : 'none', marginTop: forte ? '6px' : 0 } },
+      h('span', { style: { fontSize: forte ? '.88rem' : '.84rem', fontWeight: forte ? 700 : 500, color: forte ? 'var(--ink)' : 'var(--muted)' } }, rot),
+      h('span', { style: { fontSize: forte ? '.98rem' : '.88rem', fontWeight: 700, color: cor || 'var(--ink)', whiteSpace: 'nowrap' } }, this.m(fmt(val))));
+    const bloco = (titulo, sub, filhos) => h('div', { style: this.glass({ padding: '18px 20px' }) },
+      h('div', { style: { marginBottom: '10px' } },
+        h('div', { style: this.disp({ fontSize: '.98rem' }) }, titulo),
+        sub && h('div', { style: { fontSize: '.74rem', color: 'var(--muted)' } }, sub)),
+      ...filhos);
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+      h('div', { style: { display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' } },
+        h('span', { style: { fontSize: '.78rem', fontWeight: 700, color: 'var(--muted)' } }, 'Fechamento de'),
+        ...[['eu', 'Mim'], ['parceiro', primeiro((outro || {}).name) || 'Parceiro'], ['casal', 'Nós dois']]
+          .filter(([v]) => v !== 'parceiro' || outro)
+          .map(([v, l]) => this.chip(l, quem === v, () => this.setState({ visao: v }), 'var(--plum)'))),
+      h('div', { style: { display: 'grid', gridTemplateColumns: window.innerWidth < 900 ? '1fr' : '1fr 1fr', gap: '14px', alignItems: 'start' } },
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+        bloco('Receitas', label, [
+          linha('O que entrou', f.receitas, 'var(--pos)', true),
+          f.temBeneficio && f.benEntrada > 0 && h('div', { key: 'b', style: { fontSize: '.73rem', color: 'var(--muted)', marginTop: '8px', lineHeight: 1.5 } }, `Benefícios fora da conta: ${this.m(fmt(f.benEntrada))} — saldo da empresa, não entra na renda.`),
+        ]),
+        bloco('Resultado', label, [
+          linha('Entrou', f.receitas, 'var(--pos)'),
+          linha('Gastou', f.gastos, 'var(--neg)'),
+          h('div', { key: 'barra', style: { margin: '10px 0 4px' } },
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '.74rem', color: 'var(--muted)', fontWeight: 600, marginBottom: '5px' } },
+              h('span', null, 'Renda comprometida'), h('span', { style: { fontWeight: 700, color: f.comprometido > 90 ? 'var(--neg)' : 'var(--ink)' } }, pct(Math.min(999, f.comprometido)))),
+            h('div', { style: { height: '10px', borderRadius: '999px', background: 'var(--track)', overflow: 'hidden' } },
+              h('div', { style: { width: Math.min(100, f.comprometido) + '%', height: '100%', borderRadius: '999px', background: f.comprometido > 90 ? 'var(--neg)' : f.comprometido > 70 ? 'var(--warn)' : 'var(--pos)' } }))),
+          linha('Sobrou livre', f.sobra, f.sobra >= 0 ? 'var(--pos)' : 'var(--neg)', true),
+          f.saldoAcerto !== 0 && h('div', { key: 'ac', style: { fontSize: '.73rem', color: 'var(--muted)', marginTop: '6px' } }, `Com o acerto ${f.saldoAcerto > 0 ? 'a receber' : 'a pagar'}: ${this.m(fmt(f.sobra + f.saldoAcerto))}`),
+          f.temBeneficio && f.benGasto > 0 && h('div', { key: 'bg', style: { fontSize: '.73rem', color: 'var(--muted)', marginTop: '6px' } }, `${this.m(fmt(f.benGasto))} pagos com benefício, fora desta conta.`),
+        ])),
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+        bloco(quem === 'casal' ? 'Gastos do casal' : 'Gastos de ' + primeiro(nome), 'pela parte que pertence a cada um',
+          [...f.baldes.map(b => linha(quem === 'casal' ? b.label.replace(' (sua parte)', '') : b.label, b.v, b.cor)),
+            linha('Total gasto', f.gastos, 'var(--neg)', true)]),
+        outro && quem !== 'casal' && bloco('Acerto entre vocês', 'quem pagou pelo outro neste período', [
+          linha(primeiro((outro || {}).name) + ' tem a te pagar', f.receber, 'var(--pos)'),
+          linha('Você tem a pagar', f.pagar, 'var(--neg)'),
+          linha(f.saldoAcerto >= 0 ? 'Sobra pra você' : 'Você deve', Math.abs(f.saldoAcerto), f.saldoAcerto >= 0 ? 'var(--pos)' : 'var(--neg)', true),
+        ]))),
+      quem === 'casal' && outro && h('p', { style: { fontSize: '.73rem', color: 'var(--muted)', lineHeight: 1.5 } },
+        'A visão do casal soma o que está visível para vocês dois: seus lançamentos, os divididos e os que são de ' + primeiro(outro.name) + ' marcados como tal. O que ele lançar como só dele continua privado.'));
+  }
   viewDashboard() {
     const st = this.state, { from, to, label } = this.periodRange();
-    const items = this.rangeItems(from, to);
+    const items = this.rangeItems(from, to).filter(i => !this.ehBeneficio(i));
     const today = todayISO();
     const sai = items.filter(i => i.type === 'despesa'), ent = items.filter(i => i.type === 'receita');
-    const val = i => this.myShare(i);
+    const quem = this.state.visao || 'eu';
+    const val = i => this.parteDe(i, quem);
     const totSai = sai.reduce((a, i) => a + val(i), 0);
     const pago = sai.filter(i => this.isDone(i)).reduce((a, i) => a + val(i), 0);
     const abertas = sai.filter(i => !this.isDone(i));
@@ -1057,6 +1190,8 @@ class Component extends React.Component {
         this.stat('Saídas', totSai, 'var(--neg)'),
         this.stat('Resultado', totEnt - totSai, totEnt - totSai >= 0 ? 'var(--pos)' : 'var(--neg)'),
         this.stat(acerto.receber - acerto.pagar >= 0 ? this.partner().split(' ')[0] + ' te deve' : 'Você deve a ' + this.partner().split(' ')[0], Math.abs(acerto.receber - acerto.pagar), acerto.receber - acerto.pagar >= 0 ? 'var(--pos)' : 'var(--neg)')),
+      // fechamento no formato da planilha
+      this.renderFechamento(from, to, label),
       // gráficos
       h('div', { style: { display: 'grid', gridTemplateColumns: window.innerWidth < 900 ? '1fr' : '1.2fr 1fr', gap: '16px', alignItems: 'start' } },
         h('div', { style: this.glass({ padding: '20px 22px' }) }, this.head('Entra e sai', 'últimos 6 meses — para cima entrou, para baixo saiu'),
@@ -1891,8 +2026,10 @@ class Component extends React.Component {
       const base = this.state.period === 'ano' ? this.state.year + '-12' : mk(this.state.month || todayISO());
       const meses = [];
       for (let i = 5; i >= 0; i--) meses.push(mk(addM(base + '-01', -i)));
-      const ent = meses.map(k => this.monthItems(k).filter(i => i.type === 'receita').reduce((a, i) => a + this.myShare(i), 0));
-      const sai = meses.map(k => -this.monthItems(k).filter(i => i.type === 'despesa').reduce((a, i) => a + this.myShare(i), 0));
+      const quem = this.state.visao || 'eu';
+      const doMes = k => this.monthItems(k).filter(i => !this.ehBeneficio(i));
+      const ent = meses.map(k => doMes(k).filter(i => i.type === 'receita').reduce((a, i) => a + this.parteDe(i, quem), 0));
+      const sai = meses.map(k => -doMes(k).filter(i => i.type === 'despesa').reduce((a, i) => a + this.parteDe(i, quem), 0));
       this._charts.fluxo = new Chart(el1, {
         type: 'bar',
         data: {
@@ -1921,9 +2058,10 @@ class Component extends React.Component {
     if (el2) {
       const { from, to } = this.periodRange();
       const porCat = {};
-      this.rangeItems(from, to).filter(i => i.type === 'despesa').forEach(i => {
+      const quem2 = this.state.visao || 'eu';
+      this.rangeItems(from, to).filter(i => i.type === 'despesa' && !this.ehBeneficio(i)).forEach(i => {
         const k = i.category || 'sem';
-        porCat[k] = (porCat[k] || 0) + this.myShare(i);
+        porCat[k] = (porCat[k] || 0) + this.parteDe(i, quem2);
       });
       let linhas = Object.entries(porCat)
         .map(([id, v]) => ({ nome: id === 'sem' ? 'Sem categoria' : this.catName(id), cor: id === 'sem' ? muted : this.catColor(id), v }))
@@ -1953,7 +2091,7 @@ class Component extends React.Component {
   syncCharts() {
     if (!window.Chart) return;
     const st = this.state;
-    const sig = [st.view, st.year, st.month, st.period, st.from, st.to, st.theme, st.hideValues, this.d.transactions.length].join('|');
+    const sig = [st.view, st.year, st.month, st.period, st.from, st.to, st.theme, st.hideValues, st.visao, this.d.transactions.length].join('|');
     // o canvas pode ainda não existir quando a tela troca: nesse caso, refaz
     const faltando = (st.view === 'dashboard' && document.getElementById('ch-fluxo') && !this._charts.fluxo)
       || (st.view === 'anual' && document.getElementById('ch-year') && !this._charts.y);
@@ -1989,6 +2127,14 @@ class Component extends React.Component {
           h('button', { onClick: () => this.setState({ modal: null }), style: this.iconBtn() }, this.ico('M18 6L6 18M6 6l12 12', 20))),
         h('div', { style: { padding: '22px 24px' } }, body),
         footer && h('div', { style: { display: 'flex', gap: '10px', justifyContent: 'flex-end', padding: '16px 24px', borderTop: '1px solid var(--stroke)', position: 'sticky', bottom: 0, background: 'var(--surface)' } }, footer)));
+  }
+  beneficioField(f) {
+    return h('button', { onClick: () => this.setF({ beneficio: !f.beneficio }), style: { display: 'flex', alignItems: 'center', gap: '11px', border: '1px solid var(--stroke)', background: f.beneficio ? 'var(--warn-bg)' : 'transparent', borderRadius: '18px', padding: '12px 15px', cursor: 'pointer', color: 'var(--ink)', textAlign: 'left' } },
+      h('div', { style: { width: '46px', height: '27px', borderRadius: '999px', background: f.beneficio ? 'var(--warn)' : 'var(--track-strong)', position: 'relative', flexShrink: 0, transition: 'background .2s' } },
+        h('div', { style: { width: '21px', height: '21px', borderRadius: '50%', background: '#fff', position: 'absolute', top: '3px', left: f.beneficio ? '22px' : '3px', transition: 'left .2s', boxShadow: '0 2px 5px rgba(0,0,0,.2)' } })),
+      h('div', null,
+        h('div', { style: { fontSize: '.88rem', fontWeight: 600 } }, 'É benefício da empresa (Flash, VR, VA…)'),
+        h('div', { style: { fontSize: '.74rem', color: 'var(--muted)' } }, 'fica fora da sua renda e do seu resultado')));
   }
   sharedField(f, rotulo) {
     const o = this.otherUser(); if (!o) return null;
@@ -2048,6 +2194,7 @@ class Component extends React.Component {
         h('div', { style: { display: 'flex', gap: '12px' } }, this.field('Fecha dia', h('input', { type: 'number', min: 1, max: 31, value: f.closeDay, onChange: e => this.setF({ closeDay: +e.target.value }), style: this.inp() })), this.field('Vence dia', h('input', { type: 'number', min: 1, max: 31, value: f.dueDay, onChange: e => this.setF({ dueDay: +e.target.value }), style: this.inp() }))),
         this.field('Conta de pagamento', h('select', { value: f.payAccount, onChange: e => this.setF({ payAccount: e.target.value }), style: this.inp() }, h('option', { value: '' }, '—'), ...this.d.accounts.map(a => h('option', { key: a.id, value: a.id }, a.name)))),
         this.field('Cor', this.colors(f.color, c => this.setF({ color: c }))),
+        this.beneficioField(f),
         this.sharedField(f)),
       [cancel, h('button', { onClick: () => this.saveCard(), style: this.btn('primary') }, 'Salvar')]);
     if (M.type === 'acc') return this.shell(M.mode === 'edit' ? 'Editar conta' : 'Nova conta',
@@ -2056,6 +2203,7 @@ class Component extends React.Component {
         this.field('Tipo', h('select', { value: f.type, onChange: e => this.setF({ type: e.target.value }), style: this.inp() }, ...[['banco', 'Conta bancária'], ['dinheiro', 'Dinheiro / carteira'], ['investimento', 'Investimento']].map(([v, l]) => h('option', { key: v, value: v }, l)))),
         this.field('Saldo inicial', this.money(f.balance, v => this.setF({ balance: v }))),
         this.field('Cor', this.colors(f.color, c => this.setF({ color: c }))),
+        this.beneficioField(f),
         this.sharedField(f)),
       [cancel, h('button', { onClick: () => this.saveAcc(), style: this.btn('primary') }, 'Salvar')]);
     if (M.type === 'cat') return this.shell(M.mode === 'edit' ? 'Editar categoria' : 'Nova categoria',
