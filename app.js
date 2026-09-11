@@ -1126,6 +1126,53 @@ class Component extends React.Component {
       quem === 'casal' && outro && h('p', { style: { fontSize: '.73rem', color: 'var(--muted)', lineHeight: 1.5 } },
         'A visão do casal soma o que está visível para vocês dois: seus lançamentos, os divididos e os que são de ' + primeiro(outro.name) + ' marcados como tal. O que ele lançar como só dele continua privado.'));
   }
+  /* As duas quinzenas resumidas no painel: quanto falta pagar, quanto entra
+     e quanto sobra em cada metade do mês. */
+  resumoQuinzenas() {
+    const month = this.state.period === 'mes' ? this.state.month : todayISO().slice(0, 7);
+    const [d1, d2] = this.payDays();
+    const itens = this.monthItems(month).filter(i => !this.ehBeneficio(i));
+    const hoje = todayISO(), noMes = mk(hoje) === month;
+    const bloco = (q, dia) => {
+      const lista = itens.filter(i => this.quinzenaDe(i) === q);
+      const ent = lista.filter(i => i.type === 'receita' && this.paidByMe(i)).reduce((a, i) => a + this.myShare(i), 0);
+      const saiItens = this.minhasDeSaida(lista);
+      const rep = this.repasseDe(lista, month + '|' + q);
+      const sai = saiItens.reduce((a, i) => a + this.myShare(i), 0) + (rep ? rep.value : 0);
+      const pago = saiItens.filter(i => this.isDone(i)).reduce((a, i) => a + this.myShare(i), 0) + (rep && rep.status === 'pago' ? rep.value : 0);
+      const falta = c2(sai - pago);
+      const atual = noMes && (q === '1' ? +hoje.slice(8) < d2 : +hoje.slice(8) >= d2);
+      const pct = sai > 0 ? Math.min(100, (pago / sai) * 100) : 0;
+      return h('button', { key: q, onClick: () => this.setState({ view: 'lancamentos', lancModo: 'quinzena', month }),
+        title: 'Abrir esta quinzena em Lançamentos',
+        style: this.glass({ padding: '16px 18px', cursor: 'pointer', textAlign: 'left', color: 'var(--ink)', borderLeft: `4px solid ${q === '1' ? 'var(--plum)' : 'var(--pink-deep)'}`, border: '1px solid var(--stroke)' }) },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+          h('span', { style: { fontWeight: 700, fontSize: '.9rem' } }, (q === '1' ? '1ª' : '2ª') + ' quinzena'),
+          h('span', { style: { fontSize: '.7rem', fontWeight: 700, color: 'var(--muted)' } }, 'paga dia ' + dia),
+          atual && h('span', { style: { fontSize: '.66rem', fontWeight: 700, padding: '2px 8px', borderRadius: '999px', background: 'var(--pos-bg)', color: 'var(--pos)' } }, 'agora')),
+        h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '10px', flexWrap: 'wrap', marginTop: '8px' } },
+          h('div', { style: this.disp({ fontSize: '1.5rem', color: falta > 0 ? 'var(--neg)' : 'var(--pos)' }) }, this.m(fmt(falta))),
+          h('span', { style: { fontSize: '.72rem', color: 'var(--muted)', fontWeight: 600 } }, 'a pagar')),
+        h('div', { style: { height: '6px', borderRadius: '999px', background: 'var(--track)', overflow: 'hidden', margin: '8px 0' } },
+          h('div', { style: { width: pct + '%', height: '100%', background: 'var(--pos)' } })),
+        h('div', { style: { display: 'flex', gap: '14px', flexWrap: 'wrap', fontSize: '.75rem' } },
+          h('span', null, h('b', { style: { color: 'var(--pos)' } }, this.m(fmt(ent))), h('span', { style: { color: 'var(--muted)' } }, ' entra')),
+          h('span', null, h('b', { style: { color: 'var(--neg)' } }, this.m(fmt(sai))), h('span', { style: { color: 'var(--muted)' } }, ' sai')),
+          h('span', null, h('b', { style: { color: ent - sai >= 0 ? 'var(--pos)' : 'var(--neg)' } }, this.m(fmt(c2(ent - sai)))), h('span', { style: { color: 'var(--muted)' } }, ' sobra'))));
+    };
+    return h('div', { style: { display: 'grid', gridTemplateColumns: window.innerWidth < 760 ? '1fr' : '1fr 1fr', gap: '12px' } },
+      bloco('1', d1), bloco('2', d2));
+  }
+  /* Clicou numa categoria: mostra de onde veio aquele valor. */
+  abreCategoria(catId, from, to) {
+    const quem = this.state.visao || 'eu';
+    const lista = this.rangeItems(from, to)
+      .filter(i => i.type === 'despesa' && !this.ehBeneficio(i) && !i.isRepasse && (i.category || 'sem') === (catId || 'sem'))
+      .filter(i => this.parteDe(i, quem) > 0)
+      .sort((a, b) => this.parteDe(b, quem) - this.parteDe(a, quem));
+    if (!lista.length) return;
+    this.setState({ modal: { type: 'categoria', payload: { catId, lista, quem } } });
+  }
   viewDashboard() {
     const st = this.state, { from, to, label } = this.periodRange();
     const items = this.rangeItems(from, to).filter(i => !this.ehBeneficio(i) && !i.isRepasse);
@@ -1194,6 +1241,8 @@ class Component extends React.Component {
         this.stat('Saídas', totSai, 'var(--neg)'),
         this.stat('Resultado', totEnt - totSai, totEnt - totSai >= 0 ? 'var(--pos)' : 'var(--neg)'),
         this.stat(acerto.receber - acerto.pagar >= 0 ? this.partner().split(' ')[0] + ' te deve' : 'Você deve a ' + this.partner().split(' ')[0], Math.abs(acerto.receber - acerto.pagar), acerto.receber - acerto.pagar >= 0 ? 'var(--pos)' : 'var(--neg)')),
+      // quinzenas do mês
+      this.resumoQuinzenas(),
       // fechamento no formato da planilha
       this.renderFechamento(from, to, label),
       // gráficos
@@ -1208,7 +1257,7 @@ class Component extends React.Component {
       h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(300px,1fr))', gap: '16px', alignItems: 'start' } },
         h('div', { style: this.glass({ padding: '20px 22px' }) }, this.head('Falta pagar por categoria', label),
           cats.length === 0 ? h('p', { style: { color: 'var(--muted)', fontSize: '.87rem' } }, 'Nada em aberto neste período.')
-            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '11px' } }, ...cats.slice(0, 8).map(c => h('div', { key: c.id },
+            : h('div', { style: { display: 'flex', flexDirection: 'column', gap: '11px' } }, ...cats.slice(0, 8).map(c => h('button', { key: c.id, onClick: () => this.abreCategoria(c.id, from, to), title: 'Ver os lançamentos de ' + c.name, style: { border: 'none', background: 'transparent', padding: 0, cursor: 'pointer', textAlign: 'left', width: '100%', color: 'var(--ink)' } },
               h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '.83rem', fontWeight: 600, marginBottom: '5px' } },
                 h('span', null, c.name), h('span', { style: { fontWeight: 700 } }, this.m(fmt(c.v)))),
               h('div', { style: { height: '9px', borderRadius: '999px', background: 'var(--pink-soft)', overflow: 'hidden' } },
@@ -1278,6 +1327,8 @@ class Component extends React.Component {
           h('input', { inputMode: 'numeric', value: q.value ? q.value.toLocaleString('pt-BR', { minimumFractionDigits: 2 }) : '', onChange: e => { const d = e.target.value.replace(/\D/g, ''); setQ({ value: d ? parseInt(d) / 100 : 0 }); }, onKeyDown: e => { if (e.key === 'Enter') this.addCompraCartao(c, month); }, placeholder: '0,00', style: this.inp({ flex: '0 1 120px' }) }),
           h('select', { value: q.category || '', onChange: e => setQ({ category: e.target.value }), style: this.inp({ flex: '1 1 140px' }) }, h('option', { value: '' }, 'Categoria…'), ...this.d.categories.map(x => h('option', { key: x.id, value: x.id }, x.name))),
           h('input', { title: 'Data da compra', type: 'date', value: q.date || dataPadrao, onChange: e => setQ({ date: e.target.value }), style: this.inp({ flex: '0 1 150px' }) }),
+          h('input', { title: 'Em quantas parcelas?', type: 'number', min: 1, max: 48, value: q.parcelas || '', onChange: e => setQ({ parcelas: e.target.value }), placeholder: '1x', style: this.inp({ flex: '0 1 76px' }) }),
+          this.chip('↻ mensal', !!q.recorrente, () => setQ({ recorrente: !q.recorrente, parcelas: '' }), 'var(--pink-deep)'),
           this.otherUser() && this.chip('÷ dividir', !!q.split, () => setQ({ split: !q.split }), 'var(--plum)'),
           h('button', { onClick: () => this.addCompraCartao(c, month), style: this.btn('primary', { padding: '10px 14px' }) }, this.ico('M12 5v14M5 12h14', 17), 'Lançar')),
         compras.length === 0
@@ -1308,8 +1359,21 @@ class Component extends React.Component {
       account: card.payAccount || '', owner: me.id, split: !!q.split,
       payerId: me.id, tags: [], notes: '', subcategory: '',
     };
+    const n = Math.max(1, Math.min(48, parseInt(q.parcelas) || 1));
+    const novos = [];
+    if (q.recorrente) {
+      novos.push({ ...tx, recurring: 'mensal' });
+    } else if (n > 1) {
+      const grupo = uid(), parcela = Math.round((q.value / n) * 100) / 100;
+      for (let i = 1; i <= n; i++) novos.push({
+        ...tx, id: uid(), value: parcela, date: addM(data, i - 1), dueDate: addM(data, i - 1),
+        faturaMes: mk(addM(month + '-01', i - 1)), installment: i, installments: n,
+        installmentGroup: grupo, status: i === 1 ? 'pendente' : 'agendado',
+      });
+    } else novos.push(tx);
     this.setState({ compraRapida: { date: data, category: q.category || '' } });
-    this.save({ ...this.d, transactions: [...this.d.transactions, tx] }, () => this.toast('Lançado na fatura'));
+    this.save({ ...this.d, transactions: [...this.d.transactions, ...novos] },
+      () => this.toast(q.recorrente ? 'Lançado e repete todo mês' : n > 1 ? `Lançado em ${n}x` : 'Lançado na fatura'));
   }
   pagarFatura(card, month, compras, paga) {
     const ids = compras.map(t => t.id);
@@ -2098,11 +2162,11 @@ class Component extends React.Component {
         porCat[k] = (porCat[k] || 0) + this.parteDe(i, quem2);
       });
       let linhas = Object.entries(porCat)
-        .map(([id, v]) => ({ nome: id === 'sem' ? 'Sem categoria' : this.catName(id), cor: id === 'sem' ? muted : this.catColor(id), v }))
+        .map(([id, v]) => ({ id, nome: id === 'sem' ? 'Sem categoria' : this.catName(id), cor: id === 'sem' ? muted : this.catColor(id), v }))
         .filter(l => l.v > 0).sort((a, b) => b.v - a.v);
       if (linhas.length > 7) {
         const resto = linhas.slice(6).reduce((a, l) => a + l.v, 0);
-        linhas = [...linhas.slice(0, 6), { nome: 'Outras', cor: muted, v: resto }];
+        linhas = [...linhas.slice(0, 6), { id: '', nome: 'Outras', cor: muted, v: resto }];
       }
       this._charts.cat = new Chart(el2, {
         type: 'bar',
@@ -2114,6 +2178,7 @@ class Component extends React.Component {
             legend: { display: false },
             tooltip: { callbacks: { label: c => oculto ? '••••' : fmt(c.parsed.x) } },
           },
+          onClick: (evt, els) => { if (els && els.length) { const l = linhas[els[0].index]; if (l && l.id) this.abreCategoria(l.id, from, to); } },
           scales: {
             x: { grid: { color: grade }, border: { display: false }, ticks: { maxTicksLimit: 4, callback: v => dinheiro(v) } },
             y: { grid: { display: false }, border: { color: grade }, ticks: { color: ink, font: { weight: 600 }, crossAlign: 'far' } },
@@ -2186,6 +2251,24 @@ class Component extends React.Component {
         this.field('Nova senha', h('input', { type: 'password', value: f.pass || '', onChange: e => this.setF({ pass: e.target.value }), style: this.inp() })),
         this.field('Repita a nova senha', h('input', { type: 'password', value: f.pass2 || '', onChange: e => this.setF({ pass2: e.target.value }), style: this.inp() }))),
       [cancel, h('button', { onClick: () => this.changePw(), style: this.btn('primary') }, 'Salvar')]);
+    if (M.type === 'categoria') {
+      const { catId, lista, quem } = M.payload;
+      const total = lista.reduce((a, i) => a + this.parteDe(i, quem), 0);
+      const nome = catId && catId !== 'sem' ? this.catName(catId) : 'Sem categoria';
+      return this.shell(nome,
+        h('div', { style: { display: 'flex', flexDirection: 'column' } },
+          h('p', { style: { fontSize: '.83rem', color: 'var(--muted)', marginBottom: '10px' } }, lista.length + (lista.length === 1 ? ' lançamento' : ' lançamentos') + ' neste período, pela parte que é sua'),
+          ...lista.map(x => h('div', { key: x.id, style: { display: 'flex', justifyContent: 'space-between', gap: '12px', padding: '9px 0', borderBottom: '1px solid var(--stroke)' } },
+            h('div', { style: { minWidth: 0 } },
+              h('div', { style: { fontWeight: 600, fontSize: '.88rem' } }, x.desc,
+                x.installments > 1 && h('span', { style: { color: 'var(--muted)', fontWeight: 400, fontSize: '.74rem' } }, `  ${x.installment}/${x.installments}`)),
+              h('div', { style: { fontSize: '.73rem', color: 'var(--muted)' } },
+                [isoBR(x.dueDate || x.date), this.origemLabel(x), x.split ? 'dividida' : '', this.isDone(x) ? 'pago' : ''].filter(Boolean).join(' • '))),
+            h('span', { style: { fontWeight: 700, whiteSpace: 'nowrap' } }, this.m(fmt(this.parteDe(x, quem)))))),
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', paddingTop: '12px', fontWeight: 700 } },
+            h('span', null, 'Total'), h('span', { style: { color: 'var(--neg)' } }, this.m(fmt(total))))),
+        [h('button', { onClick: () => this.setState({ modal: null }), style: this.btn('ghost') }, 'Fechar')], true);
+    }
     if (M.type === 'repasse') {
       const it = M.payload;
       return this.shell(it.desc,
