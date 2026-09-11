@@ -63,7 +63,7 @@ function buildDemo() {
 
 const SUBS = {
   dashboard: 'O que vence e o que falta pagar no período escolhido',
-  lancamentos: 'Contas do mês por vencimento, ou a lista completa',
+  lancamentos: 'O que pagar na 1ª e na 2ª quinzena',
   cartoes: 'Compras de cada fatura, mês a mês',
   investimentos: 'Onde seu dinheiro está guardado',
   compras: 'O que falta comprar — vocês dois veem a mesma lista',
@@ -586,7 +586,7 @@ class Component extends React.Component {
 
   /* ===== ações ===== */
   openTx(mode, tx) {
-    const base = { desc: '', value: 0, type: 'despesa', category: '', date: todayISO(), dueDate: '', payMethod: 'Pix', card: '', faturaMes: '', account: this.d.accounts[0] ? this.d.accounts[0].id : '', status: 'pendente', recurring: '', installments: '', installment: '', notes: '', tags: [], subcategory: '', split: false, payer: 'eu', dono: 'me', payerId: (this.me || {}).id || '', more: false };
+    const base = { desc: '', value: 0, type: 'despesa', category: '', date: todayISO(), dueDate: '', payMethod: 'Pix', card: '', faturaMes: '', account: this.d.accounts[0] ? this.d.accounts[0].id : '', status: 'pendente', recurring: '', installments: '', installment: '', notes: '', tags: [], subcategory: '', quinzena: '', split: false, payer: 'eu', dono: 'me', payerId: (this.me || {}).id || '', more: false };
     const form = mode === 'edit' && tx
       ? { ...base, ...tx, tags: tx.tags || [], dueDate: tx._realDue || tx.dueDate, dono: tx.split ? 'split' : (this.isForOther(tx) ? 'other' : 'me'), payerId: this.payerOf(tx), more: true }
       : base;
@@ -1088,12 +1088,12 @@ class Component extends React.Component {
   }
   /* ---------- 1. LANÇAMENTOS ---------- */
   viewLancamentos() {
-    const modo = this.state.lancModo || 'mes';
+    const modo = this.state.lancModo || 'quinzena';
     return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
       h('div', { style: { display: 'flex', gap: '6px', padding: '4px', borderRadius: '999px', background: 'var(--pink-soft)', alignSelf: 'flex-start', flexWrap: 'wrap' } },
-        ...[['mes', 'Contas do mês'], ['lista', 'Lista geral']].map(([v, l]) =>
+        ...[['quinzena', 'Por quinzena'], ['mes', 'Mês inteiro'], ['lista', 'Lista geral']].map(([v, l]) =>
           h('button', { key: v, onClick: () => this.setState({ lancModo: v }), style: { padding: '9px 16px', borderRadius: '999px', border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '.84rem', background: modo === v ? 'var(--pink)' : 'transparent', color: modo === v ? '#fff' : 'var(--muted)' } }, l))),
-      modo === 'mes' ? this.blocoMes() : this.blocoLista());
+      modo === 'quinzena' ? this.blocoQuinzenas() : modo === 'mes' ? this.blocoMes() : this.blocoLista());
   }
   /* Uma fatura por vez: escolhe o cartão, escolhe o mês, lança ali mesmo. */
   viewCartoes() {
@@ -1179,6 +1179,88 @@ class Component extends React.Component {
       ? (paga ? { ...x, status: 'pendente', payDate: '' } : { ...x, status: 'pago', account: conta, payDate: todayISO() })
       : x);
     this.save({ ...this.d, transactions: trans }, () => this.toast(paga ? 'Fatura reaberta' : 'Fatura paga!', paga ? 'warn' : 'ok'));
+  }
+  /* Dias de pagamento (configuráveis). A 1ª quinzena é paga no primeiro dia,
+     a 2ª no segundo. Cada conta cai numa delas pela data de vencimento, e
+     você pode mover qualquer uma com um clique. */
+  payDays() {
+    const p = (this.d.meta && this.d.meta.payDays) || [10, 25];
+    return [Math.max(1, parseInt(p[0]) || 10), Math.max(1, parseInt(p[1]) || 25)];
+  }
+  quinzenaDe(i) {
+    const ov = (this.d.meta && this.d.meta.qOverride) || {};
+    if (ov[i.id]) return ov[i.id];
+    if (i.quinzena) return i.quinzena;
+    const dia = parseInt(String(i.dueDate || i.date || '').slice(8), 10) || 1;
+    return dia < this.payDays()[1] ? '1' : '2';
+  }
+  setQuinzena(i, q) {
+    if (i.isFatura || i.isRec) {
+      const meta = { ...(this.d.meta || {}), qOverride: { ...((this.d.meta || {}).qOverride || {}), [i.id]: q } };
+      this.save({ ...this.d, meta }, () => this.toast(q === '1' ? 'Movido para a 1ª quinzena' : 'Movido para a 2ª quinzena'));
+    } else {
+      const alvo = i._srcId || i.id;
+      this.save({ ...this.d, transactions: this.d.transactions.map(x => x.id === alvo ? { ...x, quinzena: q } : x) },
+        () => this.toast(q === '1' ? 'Movido para a 1ª quinzena' : 'Movido para a 2ª quinzena'));
+    }
+  }
+  blocoQuinzenas() {
+    const month = this.state.month, today = todayISO();
+    const [d1, d2] = this.payDays();
+    const itens = this.monthItems(month);
+    const shift = n => { const [y, m] = month.split('-'); this.setState({ month: new Date(+y, +m - 1 + n, 1).toISOString().slice(0, 7) }); };
+    const ult = new Date(+month.slice(0, 4), +month.slice(5), 0).getDate();
+    const painel = (q, dia, ate) => {
+      const lista = itens.filter(i => this.quinzenaDe(i) === q);
+      const ent = lista.filter(i => i.type === 'receita');
+      const sai = lista.filter(i => i.type === 'despesa').sort((a, b) => (a.dueDate || a.date).localeCompare(b.dueDate || b.date));
+      const totEnt = ent.reduce((a, i) => a + this.myShare(i), 0);
+      const totSai = sai.reduce((a, i) => a + this.myShare(i), 0);
+      const pago = sai.filter(i => this.isDone(i)).reduce((a, i) => a + this.myShare(i), 0);
+      const falta = totSai - pago;
+      const receber = lista.reduce((a, i) => a + this.credit(i), 0);
+      const dever = lista.reduce((a, i) => a + this.debt(i), 0);
+      const pct = totSai > 0 ? Math.min(100, (pago / totSai) * 100) : 0;
+      const atual = q === '1' ? (+today.slice(8) < d2) : (+today.slice(8) >= d2);
+      const noMes = mk(today) === month;
+      return h('div', { key: q, style: this.glass({ padding: '0', overflow: 'hidden', borderTop: `4px solid ${q === '1' ? 'var(--plum)' : 'var(--pink-deep)'}` }) },
+        h('div', { style: { padding: '18px 20px 14px' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '9px', flexWrap: 'wrap' } },
+            h('span', { style: this.disp({ fontSize: '1.05rem' }) }, q === '1' ? '1ª quinzena' : '2ª quinzena'),
+            h('span', { style: { fontSize: '.72rem', fontWeight: 700, padding: '3px 9px', borderRadius: '999px', background: 'var(--pink-soft)', color: 'var(--pink-deep)' } }, 'paga dia ' + dia),
+            noMes && atual && h('span', { style: { fontSize: '.68rem', fontWeight: 700, padding: '3px 9px', borderRadius: '999px', background: 'var(--pos-bg)', color: 'var(--pos)' } }, 'agora')),
+          h('div', { style: { fontSize: '.74rem', color: 'var(--muted)', marginTop: '3px' } }, 'vencimentos ' + ate),
+          h('div', { style: { display: 'flex', alignItems: 'baseline', gap: '14px', flexWrap: 'wrap', marginTop: '12px' } },
+            h('div', null,
+              h('div', { style: { fontSize: '.7rem', color: 'var(--muted)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '.05em' } }, 'Falta pagar'),
+              h('div', { style: this.disp({ fontSize: '1.7rem', color: falta > 0 ? 'var(--neg)' : 'var(--pos)', lineHeight: 1.1 }) }, this.m(fmt(falta)))),
+            h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap', marginLeft: 'auto', textAlign: 'right' } },
+              h('div', null, h('div', { style: { fontSize: '.68rem', color: 'var(--muted)', fontWeight: 700 } }, 'ENTRA'), h('div', { style: { fontWeight: 700, color: 'var(--pos)', fontSize: '.95rem' } }, this.m(fmt(totEnt)))),
+              h('div', null, h('div', { style: { fontSize: '.68rem', color: 'var(--muted)', fontWeight: 700 } }, 'SAI'), h('div', { style: { fontWeight: 700, color: 'var(--neg)', fontSize: '.95rem' } }, this.m(fmt(totSai)))),
+              h('div', null, h('div', { style: { fontSize: '.68rem', color: 'var(--muted)', fontWeight: 700 } }, 'SOBRA'), h('div', { style: { fontWeight: 700, color: totEnt - totSai >= 0 ? 'var(--pos)' : 'var(--neg)', fontSize: '.95rem' } }, this.m(fmt(totEnt - totSai)))))),
+          h('div', { style: { height: '8px', borderRadius: '999px', background: 'var(--track)', overflow: 'hidden', marginTop: '12px' } },
+            h('div', { style: { width: pct + '%', height: '100%', borderRadius: '999px', background: 'var(--pos)', transition: 'width .4s' } })),
+          (receber > 0 || dever > 0) && h('div', { style: { marginTop: '10px', fontSize: '.76rem', color: 'var(--plum)', fontWeight: 700 } },
+            [receber > 0 ? this.partner().split(' ')[0] + ' te deve ' + this.m(fmt(receber)) : '', dever > 0 ? 'você deve ' + this.m(fmt(dever)) : ''].filter(Boolean).join(' • '))),
+        ent.length > 0 && h('div', { style: { padding: '4px 8px 8px', borderTop: '1px solid var(--stroke)' } },
+          h('div', { style: { padding: '10px 10px 4px', fontSize: '.72rem', fontWeight: 700, color: 'var(--pos)', textTransform: 'uppercase', letterSpacing: '.05em' } }, 'Entradas'),
+          ...ent.map(i => this.monthRow(i, today, q))),
+        h('div', { style: { padding: '4px 8px 10px', borderTop: '1px solid var(--stroke)' } },
+          h('div', { style: { padding: '10px 10px 4px', fontSize: '.72rem', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '.05em' } }, `Contas (${sai.length})`),
+          sai.length === 0
+            ? h('p', { style: { color: 'var(--muted)', fontSize: '.85rem', padding: '4px 10px 8px' } }, 'Nada nesta quinzena.')
+            : h('div', null, ...sai.map(i => this.monthRow(i, today, q)))));
+    };
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+      h('div', { style: this.glass({ padding: '16px 20px', display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }) },
+        h('button', { title: 'Mês anterior', onClick: () => shift(-1), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M15 6l-6 6 6 6', 18)),
+        h('div', { style: { minWidth: '170px', textAlign: 'center' } }, h('div', { style: this.disp({ fontSize: '1.15rem', textTransform: 'capitalize' }) }, mkLong(month))),
+        h('button', { title: 'Próximo mês', onClick: () => shift(1), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M9 6l6 6-6 6', 18)),
+        h('div', { style: { flex: 1 } }),
+        h('button', { onClick: () => this.setState({ month: todayISO().slice(0, 7) }), style: this.btn('soft', { fontSize: '.83rem' }) }, 'Mês atual')),
+      h('div', { style: { display: 'grid', gridTemplateColumns: window.innerWidth < 1000 ? '1fr' : '1fr 1fr', gap: '16px', alignItems: 'start' } },
+        painel('1', d1, `dia 1 ao ${d2 - 1}`),
+        painel('2', d2, `dia ${d2} ao ${ult}`)));
   }
   blocoLista() {
     const s = this.state;
@@ -1425,7 +1507,7 @@ class Component extends React.Component {
     setTimeout(() => this.setF({ type: 'despesa', payMethod: 'Cartão', card: c.id, faturaMes: month, date: dia, dueDate: dia, status: 'pendente', more: true }), 0);
   }
   stat(label, v, color) { return h('div', { style: this.glass({ padding: '14px 16px', borderLeft: '3px solid ' + (color || 'var(--pink)') }) }, h('div', { style: { fontSize: '.7rem', color: 'var(--muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.05em' } }, label), h('div', { style: this.disp({ fontSize: 'clamp(1.1rem,2vw,1.35rem)', color }) }, this.m(fmt(v)))); }
-  monthRow(i, today) {
+  monthRow(i, today, quinzena) {
     const done = this.isDone(i);
     const dd = dayDiff(today, i.dueDate || i.date);
     const late = !done && dd < 0;
@@ -1445,6 +1527,7 @@ class Component extends React.Component {
         i.isFatura && (i.creditVal > 0 || i.debtVal > 0) && h('div', { style: { fontSize: '.71rem', color: 'var(--plum)', fontWeight: 700 } }, `sua parte ${this.m(fmt(i.myValue))}${i.creditVal > 0 ? ' • ' + this.partner().split(' ')[0] + ' te deve ' + this.m(fmt(i.creditVal)) : ''}`),
         !i.split && !this.isForOther(i) && this.debt(i) > 0 && h('div', { style: { fontSize: '.71rem', color: 'var(--plum)', fontWeight: 700 } }, `${this.partner()} pagou • você deve ${this.m(fmt(this.debt(i)))}`)),
       this.valueCell(i, isRec, true),
+      quinzena && h('button', { title: quinzena === '1' ? 'Mover para a 2ª quinzena (dia ' + this.payDays()[1] + ')' : 'Mover para a 1ª quinzena (dia ' + this.payDays()[0] + ')', onClick: () => this.setQuinzena(i, quinzena === '1' ? '2' : '1'), style: { padding: '4px 9px', borderRadius: '999px', border: '1px solid var(--stroke)', background: 'transparent', color: 'var(--muted)', fontWeight: 700, fontSize: '.68rem', cursor: 'pointer', flexShrink: 0 } }, quinzena === '1' ? '→ 2ª' : '← 1ª'),
       i.isFatura ? h('button', { title: 'Ver compras deste cartão', onClick: () => this.setState({ view: 'lancamentos', source: 'card:' + i.cardRef.id }), style: this.iconBtn() }, this.ico('M2 6h20v12H2zM2 10h20', 14))
         : i.isRec ? h('span', { style: { width: '32px' } })
           : h('button', { title: 'Editar', onClick: () => this.openTx('edit', i), style: this.iconBtn() }, this.ico('M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', 14)));
@@ -1661,6 +1744,13 @@ class Component extends React.Component {
           !this.otherUser() && h('label', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } },
             h('span', { style: { fontSize: '.85rem', fontWeight: 600 } }, 'Com quem você divide as despesas'),
             h('input', { value: this.partner(), onChange: e => this.save({ ...this.d, meta: { ...this.d.meta, partnerName: e.target.value } }), placeholder: 'Parceiro(a)', style: this.inp({ maxWidth: '280px' }) })),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' } },
+            h('span', { style: { fontSize: '.9rem' } }, 'Recebem e pagam nos dias'),
+            ...[0, 1].map(idx => h('input', { key: idx, type: 'number', min: 1, max: 31, value: this.payDays()[idx], onChange: e => {
+              const p = this.payDays().slice(); p[idx] = Math.min(31, Math.max(1, +e.target.value || 1));
+              this.save({ ...this.d, meta: { ...(this.d.meta || {}), payDays: p } });
+            }, style: this.inp({ width: '78px' }) })),
+            h('span', { style: { fontSize: '.78rem', color: 'var(--muted)' } }, 'usado para dividir as quinzenas')),
           tog('Modo escuro', this.state.theme === 'dark', () => this.savePrefs({ theme: this.state.theme === 'dark' ? 'light' : 'dark' })),
           tog('Esconder valores da tela', this.state.hideValues, () => this.savePrefs({ hideValues: !this.state.hideValues })),
           tog('Reduzir animações', this.state.motion === 'reduced', () => this.savePrefs({ motion: this.state.motion === 'reduced' ? 'full' : 'reduced' })),
@@ -2015,6 +2105,9 @@ class Component extends React.Component {
         this.field('Como pagou?', h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap' } }, ...PAY_METHODS.map(p => this.chip(p, f.payMethod === p, () => this.setF({ payMethod: p, card: p === 'Cartão' ? (f.card || (this.d.cards[0] || {}).id || '') : '' }))))),
         f.payMethod === 'Cartão' && h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
           this.field('Qual cartão?', h('select', { value: f.card, onChange: e => this.setF({ card: e.target.value }), style: this.inp() }, h('option', { value: '' }, 'Escolher…'), ...this.meusCartoes().map(c => h('option', { key: c.id, value: c.id }, c.name)))),
+          this.field('Paga em qual quinzena?', h('div', { style: { display: 'flex', gap: '7px', flexWrap: 'wrap' } },
+            ...[['', 'Automática'], ['1', '1ª — dia ' + this.payDays()[0]], ['2', '2ª — dia ' + this.payDays()[1]]].map(([v, l]) =>
+              this.chip(l, (f.quinzena || '') === v, () => this.setF({ quinzena: v }), 'var(--plum)'))), { flex: '1 1 100%' }),
           f.card && this.field('Em qual fatura?', h('select', { value: f.faturaMes || this.faturaSugerida(f), onChange: e => this.setF({ faturaMes: e.target.value }), style: this.inp() },
             ...this.opcoesFatura(f).map(o => h('option', { key: o.v, value: o.v }, o.l)))),
           this.state.modal.mode === 'add' && this.field('Parcelas', h('input', { type: 'number', min: 1, value: f.installments, onChange: e => this.setF({ installments: e.target.value }), placeholder: '1', style: this.inp() }))),
