@@ -29,7 +29,7 @@ const DEFAULT_CATS = [
 ].map(([name, color]) => ({ id: uid(), name, color }));
 const catIdOf = (cats, n) => { const c = cats.find(x => x.name === n); return c ? c.id : ''; };
 
-function emptyData() { return { accounts: [], cards: [], transactions: [], categories: DEFAULT_CATS.map(c => ({ ...c })), budgets: [], goals: [], meta: { demo: false, monthlyBudget: 0 } }; }
+function emptyData() { return { accounts: [], cards: [], transactions: [], categories: DEFAULT_CATS.map(c => ({ ...c })), budgets: [], goals: [], investments: [], shopping: [], meta: { demo: false, monthlyBudget: 0 } }; }
 
 function buildDemo() {
   const cats = DEFAULT_CATS.map(c => ({ ...c })); const C = n => catIdOf(cats, n);
@@ -63,19 +63,23 @@ function buildDemo() {
 
 const SUBS = {
   dashboard: 'O que vence e o que falta pagar no período escolhido',
-  lancamentos: 'Tudo que entrou e saiu, com filtros e busca',
-  mensal: 'Contas do mês, pagamentos e acerto da divisão',
+  lancamentos: 'Contas do mês por vencimento, ou a lista completa',
+  cartoes: 'Compras de cada fatura, mês a mês',
+  investimentos: 'Onde seu dinheiro está guardado',
+  compras: 'O que falta comprar — vocês dois veem a mesma lista',
   anual: 'Comparativo mês a mês por categoria',
-  metas: 'Reservas, investimentos e objetivos',
+  metas: 'Objetivos conjuntos e individuais',
   config: 'Cartões, contas, categorias, acesso e backup',
 };
 
 const NAV = [
   ['dashboard', 'Painel', 'M4 13h6V4H4v9zm0 7h6v-5H4v5zm10 0h6V11h-6v9zm0-16v5h6V4h-6z'],
   ['lancamentos', 'Lançamentos', 'M12 5v14M5 12h14'],
-  ['mensal', 'Planejamento mensal', 'M4 5h16v15H4zM4 9h16M9 3v4M15 3v4'],
+  ['cartoes', 'Cartões', 'M2 6h20v12H2zM2 10h20'],
   ['anual', 'Relatório anual', 'M4 20V4M4 20h16M8 17V9M13 17v-5M18 17V6'],
   ['metas', 'Metas', 'M12 21s7-5.2 7-10.6A7 7 0 005 10.4C5 15.8 12 21 12 21zM12 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z'],
+  ['investimentos', 'Investimentos', 'M4 19h16M7 16V10m5 6V5m5 11v-8'],
+  ['compras', 'Lista de compras', 'M5 6h15l-1.4 9.4a2 2 0 01-2 1.6H8.4a2 2 0 01-2-1.6L5 6zm0 0L4.4 3H2m6 17.5a1 1 0 100 .01M16 20.5a1 1 0 100 .01'],
   ['config', 'Configurações', 'M12 8.5a3.5 3.5 0 100 7 3.5 3.5 0 000-7zM3.5 12h2m13 0h2M12 3.5v2m0 13v2M5.9 5.9l1.4 1.4m9.4 9.4l1.4 1.4m0-12.2l-1.4 1.4M7.3 16.7l-1.4 1.4'],
 ];
 
@@ -84,7 +88,7 @@ window.SB = (window.FINCONFIG && window.FINCONFIG.url && window.FINCONFIG.anonKe
   ? window.supabase.createClient(window.FINCONFIG.url, window.FINCONFIG.anonKey)
   : null;
 
-const COLLECTIONS = ['accounts', 'cards', 'transactions', 'categories', 'budgets', 'goals'];
+const COLLECTIONS = ['accounts', 'cards', 'transactions', 'categories', 'budgets', 'goals', 'investments', 'shopping'];
 
 /* arredonda para centavos — evita "R$ 53,85" onde a soma das linhas dá 53,86 */
 const c2 = n => Math.round((Number(n) || 0) * 100) / 100;
@@ -168,7 +172,7 @@ class Component extends React.Component {
   save(data, cb) {
     const D = this.state.data, me = this.me;
     const full = { ...D, ...data };
-    if (me) ['transactions', 'accounts', 'cards', 'goals'].forEach(k => {
+    if (me) ['transactions', 'accounts', 'cards', 'goals', 'investments'].forEach(k => {
       const hidden = (D[k] || []).filter(x => !this.mine(x));
       const shown = (data[k] || []).filter(x => !x._foreign).map(x => x.owner ? x : { ...x, owner: me.id });
       full[k] = [...shown, ...hidden];
@@ -330,7 +334,7 @@ class Component extends React.Component {
     const txs = f(D.transactions);
     const need = new Set(txs.map(t => t.card).filter(Boolean));
     const cards = (D.cards || []).filter(c => this.mine(c) || need.has(c.id)).map(c => this.mine(c) ? c : { ...c, _foreign: true });
-    return { ...D, transactions: txs, accounts: f(D.accounts), cards, goals: f(D.goals) };
+    return { ...D, transactions: txs, accounts: f(D.accounts), cards, goals: f(D.goals), investments: f(D.investments), shopping: D.shopping || [] };
   }
   cat(id) { return this.d.categories.find(c => c.id === id); }
   catName(id) { const c = this.cat(id); return c ? c.name : 'Sem categoria'; }
@@ -647,6 +651,202 @@ class Component extends React.Component {
   disp(x = {}) { return { fontFamily: 'inherit', fontWeight: 700, letterSpacing: '-.018em', ...x }; }
 
   /* ===== render ===== */
+  /* ---------- METAS: conjuntas x individuais ---------- */
+  metasFiltradas() {
+    const gs = this.d.goals || [];
+    const aba = this.state.metaAba || 'todas';
+    if (!this.otherUser() || aba === 'todas') return gs;
+    return aba === 'conjuntas' ? gs.filter(g => g.shared) : gs.filter(g => !g.shared);
+  }
+
+  /* ---------- INVESTIMENTOS ---------- */
+  openInv(mode, x) {
+    const base = { name: '', place: '', kind: 'Renda fixa', value: 0, date: todayISO(), notes: '', shared: false };
+    this.setState({ modal: { type: 'inv', mode }, form: mode === 'edit' && x ? { ...base, ...x } : base });
+  }
+  saveInv() {
+    const f = this.state.form;
+    if (!f.name) return this.toast('Dá um nome ao investimento', 'err');
+    if (!f.value || f.value <= 0) return this.toast('Informe o valor', 'err');
+    const inv = [...(this.d.investments || [])];
+    if (this.state.modal.mode === 'edit') { const i = inv.findIndex(x => x.id === f.id); inv[i] = { ...f }; }
+    else inv.push({ ...f, id: uid() });
+    this.save({ ...this.d, investments: inv }, () => this.toast('Investimento salvo'));
+    this.setState({ modal: null });
+  }
+  delInv(id) {
+    this.setState({ confirm: { danger: true, msg: 'Excluir este investimento?', onYes: () => {
+      this.save({ ...this.d, investments: (this.d.investments || []).filter(x => x.id !== id) }, () => this.toast('Excluído', 'warn'));
+      this.setState({ confirm: null });
+    } } });
+  }
+  viewInvestimentos() {
+    const inv = this.d.investments || [];
+    const total = inv.reduce((a, x) => a + (x.value || 0), 0);
+    const porTipo = {};
+    inv.forEach(x => { porTipo[x.kind || 'Outro'] = (porTipo[x.kind || 'Outro'] || 0) + (x.value || 0); });
+    const tipos = Object.entries(porTipo).sort((a, b) => b[1] - a[1]);
+    const maior = tipos.length ? tipos[0][1] : 1;
+    const cores = { 'Renda fixa': 'var(--pos)', 'Renda variável': 'var(--plum)', 'Cripto': 'var(--warn)', 'Fundo': 'var(--coral)', 'Poupança': 'var(--pink)', 'Previdência': 'var(--mustard)', 'Outro': 'var(--muted)' };
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+      h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: '12px' } },
+        this.stat('Total investido', total, 'var(--pos)'),
+        this.stat('Aplicações', inv.length, 'var(--plum)'),
+        this.stat('Maior posição', inv.reduce((a, x) => Math.max(a, x.value || 0), 0), 'var(--pink-deep)')),
+      h('div', { style: { display: 'flex', justifyContent: 'flex-end' } },
+        h('button', { onClick: () => this.openInv('add'), style: this.btn('primary') }, this.ico('M12 5v14M5 12h14', 17), 'Novo investimento')),
+      tipos.length > 0 && h('div', { style: this.glass({ padding: '20px 22px' }) }, this.head('Por tipo'),
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: '11px' } }, ...tipos.map(([k, v]) => h('div', { key: k },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: '.83rem', fontWeight: 600, marginBottom: '5px' } },
+            h('span', null, k), h('span', { style: { fontWeight: 700 } }, this.m(fmt(v)))),
+          h('div', { style: { height: '9px', borderRadius: '999px', background: 'var(--track)', overflow: 'hidden' } },
+            h('div', { style: { width: (v / maior) * 100 + '%', height: '100%', background: cores[k] || 'var(--pink)', borderRadius: '999px' } })))))),
+      inv.length === 0
+        ? this.empty('Nenhum investimento anotado', 'Use esta aba como caixinha: anote onde seu dinheiro está guardado — CDB, tesouro, ações, cripto, poupança — e acompanhe o total.', h('button', { onClick: () => this.openInv('add'), style: this.btn('primary') }, 'Anotar o primeiro'), 'ticket')
+        : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(300px,1fr))', gap: '14px' } }, ...inv.slice().sort((a, b) => (b.value || 0) - (a.value || 0)).map(x =>
+          h('div', { key: x.id, style: this.glass({ padding: '18px 20px', borderLeft: '4px solid ' + (cores[x.kind] || 'var(--pink)') }) },
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' } },
+              h('div', { style: { minWidth: 0 } },
+                h('div', { style: this.disp({ fontSize: '1rem' }) }, x.name),
+                h('div', { style: { fontSize: '.75rem', color: 'var(--muted)', marginTop: '2px' } }, [x.place, x.kind].filter(Boolean).join(' · '))),
+              h('div', { style: { display: 'flex', flexShrink: 0 } },
+                h('button', { title: 'Editar', onClick: () => this.openInv('edit', x), style: this.iconBtn() }, this.ico('M12 20h9M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4z', 15)),
+                h('button', { title: 'Excluir', onClick: () => this.delInv(x.id), style: this.iconBtn('var(--neg)') }, this.ico('M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14', 15)))),
+            h('div', { style: this.disp({ fontSize: '1.4rem', color: 'var(--pos)', marginTop: '12px' }) }, this.m(fmt(x.value))),
+            h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '8px', alignItems: 'center' } },
+              x.date && h('span', { style: { fontSize: '.72rem', color: 'var(--muted)' } }, 'atualizado em ' + isoBR(x.date)),
+              x.shared && this.otherUser() && h('span', { style: { fontSize: '.69rem', fontWeight: 700, padding: '3px 9px', borderRadius: '999px', background: 'rgba(142,92,134,.16)', color: 'var(--plum)' } }, 'conjunto')),
+            x.notes && h('p', { style: { fontSize: '.78rem', color: 'var(--muted)', marginTop: '8px', lineHeight: 1.5 } }, x.notes)))));
+  }
+
+  /* ---------- LISTA DE COMPRAS (sempre dos dois) ---------- */
+  addCompra() {
+    const nome = (this.state.compraNova || '').trim();
+    if (!nome) return;
+    const me = this.me || {};
+    const item = { id: uid(), name: nome, done: false, by: me.id || '', byName: (me.name || '').split(' ')[0], at: todayISO() };
+    this.setState({ compraNova: '' });
+    this.save({ ...this.d, shopping: [...(this.d.shopping || []), item] });
+  }
+  toggleCompra(id) {
+    this.save({ ...this.d, shopping: (this.d.shopping || []).map(x => x.id === id ? { ...x, done: !x.done } : x) });
+  }
+  delCompra(id) { this.save({ ...this.d, shopping: (this.d.shopping || []).filter(x => x.id !== id) }); }
+  limparCompras() {
+    this.setState({ confirm: { msg: 'Tirar da lista tudo que já foi comprado?', onYes: () => {
+      this.save({ ...this.d, shopping: (this.d.shopping || []).filter(x => !x.done) }, () => this.toast('Lista limpa'));
+      this.setState({ confirm: null });
+    } } });
+  }
+  viewCompras() {
+    const lista = this.d.shopping || [];
+    const faltam = lista.filter(x => !x.done), feitos = lista.filter(x => x.done);
+    const linha = x => h('div', { key: x.id, style: { display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 12px', borderRadius: '12px' } },
+      h('button', { onClick: () => this.toggleCompra(x.id), title: x.done ? 'Desmarcar' : 'Marcar como comprado', style: { width: '24px', height: '24px', flexShrink: 0, borderRadius: '8px', cursor: 'pointer', border: x.done ? 'none' : '2px solid var(--stroke)', background: x.done ? 'var(--pos)' : 'transparent', color: '#fff', display: 'grid', placeItems: 'center' } }, x.done && this.ico('M20 6L9 17l-5-5', 14)),
+      h('div', { style: { flex: 1, minWidth: 0 } },
+        h('div', { style: { fontSize: '.92rem', fontWeight: 600, textDecoration: x.done ? 'line-through' : 'none', color: x.done ? 'var(--muted)' : 'var(--ink)', textWrap: 'pretty' } }, x.name),
+        x.byName && h('div', { style: { fontSize: '.7rem', color: 'var(--muted)' } }, 'anotado por ' + x.byName)),
+      h('button', { title: 'Tirar da lista', onClick: () => this.delCompra(x.id), style: this.iconBtn('var(--neg)') }, this.ico('M18 6L6 18M6 6l12 12', 15)));
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+      h('div', { style: this.glass({ padding: '18px 20px', display: 'flex', gap: '10px', flexWrap: 'wrap', alignItems: 'center' }) },
+        h('input', { value: this.state.compraNova || '', onChange: e => this.setState({ compraNova: e.target.value }), onKeyDown: e => { if (e.key === 'Enter') this.addCompra(); }, placeholder: 'O que falta comprar?', style: this.inp({ flex: '1 1 220px' }) }),
+        h('button', { onClick: () => this.addCompra(), style: this.btn('primary') }, this.ico('M12 5v14M5 12h14', 17), 'Adicionar')),
+      this.otherUser() && h('div', { style: { padding: '11px 15px', borderRadius: '12px', background: 'var(--pink-soft)', color: 'var(--pink-deep)', fontSize: '.82rem' } },
+        'Esta lista é a mesma para você e ' + this.partner().split(' ')[0] + ' — o que um anota, o outro vê.'),
+      lista.length === 0
+        ? this.empty('Lista vazia', 'Anote aqui o que falta comprar. Dá para ir marcando conforme compra, e os dois veem a mesma lista.', null, 'lollipop')
+        : h('div', { style: { display: 'grid', gridTemplateColumns: window.innerWidth < 900 ? '1fr' : '1fr 1fr', gap: '16px', alignItems: 'start' } },
+          h('div', { style: this.glass({ padding: '10px' }) },
+            h('div', { style: { padding: '10px 12px 6px' } }, h('span', { style: this.disp({ fontSize: '.96rem', color: 'var(--warn)' }) }, `Falta comprar (${faltam.length})`)),
+            faltam.length === 0 ? h('p', { style: { color: 'var(--muted)', fontSize: '.86rem', padding: '4px 12px 12px' } }, 'Nada pendente por aqui.') : h('div', null, ...faltam.map(linha))),
+          h('div', { style: this.glass({ padding: '10px' }) },
+            h('div', { style: { padding: '10px 12px 6px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', flexWrap: 'wrap' } },
+              h('span', { style: this.disp({ fontSize: '.96rem', color: 'var(--pos)' }) }, `Já comprei (${feitos.length})`),
+              feitos.length > 0 && h('button', { onClick: () => this.limparCompras(), style: this.btn('ghost', { fontSize: '.78rem', padding: '6px 12px' }) }, 'Limpar')),
+            feitos.length === 0 ? h('p', { style: { color: 'var(--muted)', fontSize: '.86rem', padding: '4px 12px 12px' } }, 'Nada marcado ainda.') : h('div', null, ...feitos.map(linha)))));
+  }
+
+  /* ---------- EXPORTAR O ANO ---------- */
+  dadosAnuais() {
+    const y = this.state.year;
+    const meses = Array.from({ length: 12 }, (_, i) => `${y}-${String(i + 1).padStart(2, '0')}`);
+    const txY = this.d.transactions.filter(t => (t.dueDate || t.date).slice(0, 4) === String(y));
+    const resumo = meses.map((k, i) => {
+      const list = txY.filter(t => mk(t.dueDate || t.date) === k);
+      const e = list.filter(t => t.type === 'receita').reduce((a, t) => a + this.myShare(t), 0);
+      const s = list.filter(t => t.type === 'despesa').reduce((a, t) => a + this.myShare(t), 0);
+      return { mes: MONTHS[i], e, s, r: e - s };
+    });
+    const cats = {};
+    txY.filter(t => t.type === 'despesa').forEach(t => {
+      const nome = this.catName(t.category) || 'Sem categoria';
+      cats[nome] = cats[nome] || { total: 0, m: Array(12).fill(0) };
+      cats[nome].total += this.myShare(t);
+      cats[nome].m[+mk(t.dueDate || t.date).slice(5) - 1] += this.myShare(t);
+    });
+    const catRows = Object.entries(cats).sort((a, b) => b[1].total - a[1].total);
+    const maiorDoMes = meses.map((k, i) => {
+      let nome = '—', v = 0;
+      catRows.forEach(([c, d]) => { if (d.m[i] > v) { v = d.m[i]; nome = c; } });
+      return { mes: MONTHS[i], categoria: nome, valor: v };
+    });
+    return { y, meses, resumo, catRows, maiorDoMes, txY };
+  }
+  exportAnualXLSX() {
+    if (!window.XLSX) return this.toast('Planilha ainda carregando, tenta de novo', 'err');
+    const { y, resumo, catRows, maiorDoMes, txY } = this.dadosAnuais();
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(resumo.map(r => ({ 'Mês': r.mes, 'Entradas': r.e, 'Saídas': r.s, 'Resultado': r.r }))), 'Resumo');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(catRows.map(([c, d]) => {
+      const linha = { 'Categoria': c };
+      MONTHS_S.forEach((m, i) => { linha[m] = d.m[i]; });
+      linha['Total'] = d.total;
+      return linha;
+    })), 'Categorias');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(maiorDoMes.map(r => ({ 'Mês': r.mes, 'Categoria que mais gastou': r.categoria, 'Valor': r.valor }))), 'Destaques');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(txY.map(t => ({
+      'Data': isoBR(t.date), 'Vencimento': isoBR(t.dueDate || t.date), 'Descrição': t.desc, 'Tipo': t.type,
+      'Categoria': this.catName(t.category), 'Minha parte': this.myShare(t), 'Valor lançado': t.value,
+      'Status': t.status, 'Forma': t.payMethod || '', 'Cartão': this.origemLabel(t), 'Dividida': t.split ? 'sim' : 'não',
+    }))), 'Lançamentos');
+    XLSX.writeFile(wb, `financas-${y}.xlsx`);
+    this.toast('Planilha gerada');
+  }
+  exportAnualPDF() {
+    const { y, resumo, catRows, maiorDoMes } = this.dadosAnuais();
+    const money = v => 'R$ ' + (Number(v) || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const totE = resumo.reduce((a, r) => a + r.e, 0), totS = resumo.reduce((a, r) => a + r.s, 0);
+    const esc = t => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const linhasResumo = resumo.map(r => `<tr><td>${esc(r.mes)}</td><td class="n">${money(r.e)}</td><td class="n">${money(r.s)}</td><td class="n ${r.r < 0 ? 'neg' : 'pos'}">${money(r.r)}</td></tr>`).join('');
+    const linhasCat = catRows.map(([c, d]) => `<tr><td>${esc(c)}</td>${d.m.map(v => `<td class="n s">${v ? money(v) : '—'}</td>`).join('')}<td class="n b">${money(d.total)}</td></tr>`).join('');
+    const linhasTop = maiorDoMes.filter(r => r.valor > 0).map(r => `<tr><td>${esc(r.mes)}</td><td>${esc(r.categoria)}</td><td class="n">${money(r.valor)}</td></tr>`).join('');
+    const doc = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8"><title>Financas ${y}</title><style>
+      *{box-sizing:border-box} body{font:12px/1.5 system-ui,-apple-system,sans-serif;color:#23262c;margin:28px}
+      h1{font-size:20px;margin:0 0 2px} h2{font-size:14px;margin:26px 0 8px}
+      .sub{color:#6b7280;font-size:12px;margin-bottom:18px}
+      .kpis{display:flex;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+      .kpi{border:1px solid #e5e7eb;border-radius:10px;padding:10px 14px;min-width:150px}
+      .kpi span{display:block;font-size:10px;text-transform:uppercase;letter-spacing:.05em;color:#6b7280}
+      .kpi b{font-size:16px}
+      table{width:100%;border-collapse:collapse;margin-top:4px} th,td{border-bottom:1px solid #e5e7eb;padding:6px 8px;text-align:left}
+      th{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:#6b7280}
+      td.n{text-align:right;font-variant-numeric:tabular-nums} td.s{font-size:10px} td.b{font-weight:700}
+      .pos{color:#2f7d58} .neg{color:#c2413a}
+      @page{size:A4 landscape;margin:12mm}
+      </style></head><body>
+      <h1>Finanças ${y}</h1><div class="sub">Valores já considerando apenas a sua parte nas contas divididas.</div>
+      <div class="kpis"><div class="kpi"><span>Entradas no ano</span><b>${money(totE)}</b></div>
+      <div class="kpi"><span>Saídas no ano</span><b>${money(totS)}</b></div>
+      <div class="kpi"><span>Resultado</span><b class="${totE - totS < 0 ? 'neg' : 'pos'}">${money(totE - totS)}</b></div></div>
+      <h2>Resumo mês a mês</h2><table><thead><tr><th>Mês</th><th class="n">Entradas</th><th class="n">Saídas</th><th class="n">Resultado</th></tr></thead><tbody>${linhasResumo}</tbody></table>
+      <h2>Onde gastou mais em cada mês</h2><table><thead><tr><th>Mês</th><th>Categoria</th><th class="n">Valor</th></tr></thead><tbody>${linhasTop || '<tr><td colspan="3">Sem saídas no ano.</td></tr>'}</tbody></table>
+      <h2>Categorias mês a mês</h2><table><thead><tr><th>Categoria</th>${MONTHS_S.map(m => `<th class="n">${m}</th>`).join('')}<th class="n">Total</th></tr></thead><tbody>${linhasCat || '<tr><td>Sem saídas no ano.</td></tr>'}</tbody></table>
+      </body></html>`;
+    const w = window.open('', '_blank');
+    if (!w) return this.toast('Libere as janelas pop-up para gerar o PDF', 'err');
+    w.document.write(doc); w.document.close();
+    setTimeout(() => { try { w.focus(); w.print(); } catch (e) {} }, 350);
+  }
   render() { return h('div', { id: 'groovy-root' }, this.renderApp()); }
   renderApp() {
     if (this.state.booting) return this.renderBoot();
@@ -700,10 +900,7 @@ class Component extends React.Component {
         const on = this.state.view === id;
         return h('button', { key: id, onClick: () => this.setState({ view: id, mobileNav: false }), style: { display: 'flex', alignItems: 'center', gap: '12px', padding: '10px 13px', borderRadius: '10px', border: 'none', cursor: 'pointer', width: '100%', textAlign: 'left', flexShrink: 0, background: on ? 'var(--pink-soft)' : 'transparent', color: on ? 'var(--pink-deep)' : 'var(--muted)', fontWeight: on ? 600 : 500, fontSize: '.875rem', boxShadow: 'none', transition: 'background .2s' } }, this.ico(path, 19), h('span', null, label));
       }),
-      h('div', { style: { flex: 1 } }),
-      h('div', { style: { padding: '13px 15px', borderRadius: '10px', background: 'var(--pink-soft)', flexShrink: 0, position: 'relative' } },
-        h('div', { style: { fontSize: '.72rem', color: 'var(--muted)', fontWeight: 600 } }, 'Saldo em conta'),
-        h('div', { style: this.disp({ fontSize: '1.2rem', color: 'var(--pos)' }) }, this.m(fmt(this.totalBalance())))));
+      h('div', { style: { flex: 1 } }));
   }
   renderTop(narrow) {
     return h('header', { style: { position: 'sticky', top: 0, zIndex: 30, display: 'flex', alignItems: 'center', gap: '10px', padding: 'clamp(12px,2vw,18px) clamp(14px,2.6vw,30px)', background: 'var(--surface)', borderBottom: '1px solid var(--stroke)' } },
@@ -727,7 +924,10 @@ class Component extends React.Component {
     switch (this.state.view) {
       case 'dashboard': return this.viewDashboard();
       case 'lancamentos': return this.viewLancamentos();
-      case 'mensal': return this.viewMensal();
+      case 'cartoes': return this.viewCartoes();
+      case 'mensal': return this.viewLancamentos();
+      case 'investimentos': return this.viewInvestimentos();
+      case 'compras': return this.viewCompras();
       case 'anual': return this.viewAnual();
       case 'metas': return this.viewMetas();
       case 'config': return this.viewConfig();
@@ -811,7 +1011,7 @@ class Component extends React.Component {
         this.stat('Entradas', totEnt, 'var(--pos)'),
         this.stat('Saídas', totSai, 'var(--neg)'),
         this.stat('Resultado', totEnt - totSai, totEnt - totSai >= 0 ? 'var(--pos)' : 'var(--neg)'),
-        this.stat('Acerto com ' + this.partner(), acerto.receber - acerto.pagar, acerto.receber - acerto.pagar >= 0 ? 'var(--pos)' : 'var(--neg)')),
+        this.stat(acerto.receber - acerto.pagar >= 0 ? this.partner().split(' ')[0] + ' te deve' : 'Você deve a ' + this.partner().split(' ')[0], Math.abs(acerto.receber - acerto.pagar), acerto.receber - acerto.pagar >= 0 ? 'var(--pos)' : 'var(--neg)')),
       // gráficos
       h('div', { style: { display: 'grid', gridTemplateColumns: window.innerWidth < 900 ? '1fr' : '1.2fr 1fr', gap: '16px', alignItems: 'start' } },
         h('div', { style: this.glass({ padding: '20px 22px' }) }, this.head('Entra e sai', 'últimos 6 meses — para cima entrou, para baixo saiu'),
@@ -843,6 +1043,26 @@ class Component extends React.Component {
   }
   /* ---------- 1. LANÇAMENTOS ---------- */
   viewLancamentos() {
+    const modo = this.state.lancModo || 'mes';
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+      h('div', { style: { display: 'flex', gap: '6px', padding: '4px', borderRadius: '999px', background: 'var(--pink-soft)', alignSelf: 'flex-start', flexWrap: 'wrap' } },
+        ...[['mes', 'Contas do mês'], ['lista', 'Lista geral']].map(([v, l]) =>
+          h('button', { key: v, onClick: () => this.setState({ lancModo: v }), style: { padding: '9px 16px', borderRadius: '999px', border: 'none', cursor: 'pointer', fontWeight: 700, fontSize: '.84rem', background: modo === v ? 'var(--pink)' : 'transparent', color: modo === v ? '#fff' : 'var(--muted)' } }, l))),
+      modo === 'mes' ? this.blocoMes() : this.blocoLista());
+  }
+  viewCartoes() {
+    const month = this.state.month;
+    const shift = n => { const [y, m] = month.split('-'); this.setState({ month: new Date(+y, +m - 1 + n, 1).toISOString().slice(0, 7) }); };
+    return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
+      h('div', { style: this.glass({ padding: '18px 22px', display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }) },
+        h('button', { title: 'Mês anterior', onClick: () => shift(-1), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M15 6l-6 6 6 6', 18)),
+        h('div', { style: { minWidth: '180px', textAlign: 'center' } }, h('div', { style: this.disp({ fontSize: '1.2rem', textTransform: 'capitalize' }) }, 'Faturas de ' + mkLong(month))),
+        h('button', { title: 'Próximo mês', onClick: () => shift(1), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M9 6l6 6-6 6', 18)),
+        h('div', { style: { flex: 1 } }),
+        h('button', { onClick: () => this.setState({ month: todayISO().slice(0, 7) }), style: this.btn('soft', { fontSize: '.83rem' }) }, 'Mês atual')),
+      this.mensalCartoes(month));
+  }
+  blocoLista() {
     const s = this.state;
     let tx = this.d.transactions.slice();
     if (s.source === 'pix') tx = tx.filter(t => t.payMethod === 'Pix');
@@ -970,7 +1190,7 @@ class Component extends React.Component {
   iconBtn(c = 'var(--muted)') { return { display: 'grid', placeItems: 'center', width: '32px', height: '32px', borderRadius: '10px', border: 'none', background: 'transparent', color: c, cursor: 'pointer' }; }
 
   /* ---------- 2. PLANEJAMENTO MENSAL ---------- */
-  viewMensal() {
+  blocoMes() {
     const month = this.state.month;
     const items = this.monthItems(month);
     const ent = items.filter(i => i.type === 'receita');
@@ -979,7 +1199,6 @@ class Component extends React.Component {
     const totSai = sai.reduce((a, i) => a + this.myShare(i), 0);
     const pagoSai = sai.filter(i => this.isDone(i)).reduce((a, i) => a + this.myShare(i), 0);
     const acerto = this.settlement(month);
-    const tab = this.state.mensalTab || 'contas';
     const faltaSai = totSai - pagoSai;
     const today = todayISO();
     const shift = n => { const [y, m] = month.split('-'); const d = new Date(+y, +m - 1 + n, 1); this.setState({ month: d.toISOString().slice(0, 7) }); };
@@ -990,9 +1209,9 @@ class Component extends React.Component {
     ];
     return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
       h('div', { style: this.glass({ padding: '18px 22px', display: 'flex', alignItems: 'center', gap: '14px', flexWrap: 'wrap' }) },
-        h('button', { onClick: () => shift(-1), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M15 6l-6 6 6 6', 18)),
+        h('button', { title: 'Mês anterior', onClick: () => shift(-1), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M15 6l-6 6 6 6', 18)),
         h('div', { style: { minWidth: '180px', textAlign: 'center' } }, h('div', { style: this.disp({ fontSize: '1.2rem', textTransform: 'capitalize' }) }, mkLong(month))),
-        h('button', { onClick: () => shift(1), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M9 6l6 6-6 6', 18)),
+        h('button', { title: 'Próximo mês', onClick: () => shift(1), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M9 6l6 6-6 6', 18)),
         h('div', { style: { flex: 1 } }),
         h('button', { onClick: () => this.setState({ month: todayISO().slice(0, 7) }), style: this.btn('soft', { fontSize: '.83rem' }) }, 'Mês atual')),
       h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: '12px' } },
@@ -1024,12 +1243,7 @@ class Component extends React.Component {
             h('div', { style: this.disp({ fontSize: '1rem', color: 'var(--pink-deep)' }) },
               acerto.saldo === 0 ? 'estão quites'
                 : (acerto.saldo > 0 ? this.partner().split(' ')[0] + ' te deve ' : 'você deve ') + this.m(fmt(Math.abs(acerto.saldo))))))),
-      // abas
-      h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
-        this.chip('Contas do mês', tab === 'contas', () => this.setState({ mensalTab: 'contas' })),
-        this.chip('Cartões de crédito', tab === 'cartoes', () => this.setState({ mensalTab: 'cartoes' }))),
-      tab === 'cartoes' ? this.mensalCartoes(month) :
-      items.length === 0 ? this.empty('Mês vazio', 'Nenhuma conta neste mês. Lance algo na aba Lançamentos ou marque despesas como recorrentes.', h('button', { onClick: () => this.setState({ view: 'lancamentos' }), style: this.btn('primary') }, 'Ir para Lançamentos'), 'wine')
+      items.length === 0 ? this.empty('Mês vazio', 'Nenhuma conta neste mês. Use "Novo lançamento" ou marque despesas como recorrentes.', h('button', { onClick: () => this.openTx('add'), style: this.btn('primary') }, 'Lançar agora'), 'wine')
         : h('div', { style: { display: 'grid', gridTemplateColumns: window.innerWidth < 1000 ? '1fr' : '1.55fr 1fr', gap: '16px', alignItems: 'start' } },
           h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
             ...groups.filter(([, l]) => l.length).map(([label, list, color]) =>
@@ -1145,7 +1359,10 @@ class Component extends React.Component {
         h('div', { style: this.disp({ fontSize: '1.3rem', minWidth: '80px', textAlign: 'center' }) }, y),
         h('button', { onClick: () => this.setState({ year: y + 1 }), style: this.btn('ghost', { padding: '9px 12px' }) }, this.ico('M9 6l6 6-6 6', 18)),
         h('div', { style: { flex: 1 } }),
-        h('button', { onClick: () => this.exportCSV(), style: this.btn('ghost', { fontSize: '.83rem' }) }, this.ico('M12 3v12m0 0l-4-4m4 4l4-4M5 21h14', 15), 'Exportar CSV')),
+        h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+          h('button', { onClick: () => this.exportAnualPDF(), style: this.btn('ghost', { fontSize: '.83rem' }) }, this.ico('M6 2h9l5 5v15H6zM15 2v5h5M9 13h6M9 17h6', 15), 'PDF do ano'),
+          h('button', { onClick: () => this.exportAnualXLSX(), style: this.btn('ghost', { fontSize: '.83rem' }) }, this.ico('M4 4h16v16H4zM4 9h16M10 9v11', 15), 'Excel do ano'),
+          h('button', { onClick: () => this.exportCSV(), style: this.btn('ghost', { fontSize: '.83rem' }) }, this.ico('M12 3v12m0 0l-4-4m4 4l4-4M5 21h14', 15), 'CSV'))),
       h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit,minmax(180px,1fr))', gap: '12px' } },
         this.stat('Entradas no ano', totE, 'var(--pos)'),
         this.stat('Saídas no ano', totS, 'var(--neg)'),
@@ -1190,7 +1407,7 @@ class Component extends React.Component {
 
   /* ---------- 4. METAS / INVESTIMENTOS ---------- */
   viewMetas() {
-    const gs = this.d.goals || [];
+    const gs = this.metasFiltradas();
     const totalGuardado = gs.reduce((a, g) => a + (g.saved || 0), 0);
     const totalObjetivo = gs.reduce((a, g) => a + (g.total || 0), 0);
     return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '16px' } },
@@ -1198,7 +1415,13 @@ class Component extends React.Component {
         this.stat('Total investido', totalGuardado, 'var(--pos)'),
         this.stat('Objetivo total', totalObjetivo, 'var(--plum)'),
         this.stat('Falta guardar', Math.max(0, totalObjetivo - totalGuardado), 'var(--pink-deep)')),
-      h('div', { style: { display: 'flex', justifyContent: 'flex-end' } }, h('button', { onClick: () => this.openGoal('add'), style: this.btn('primary') }, this.ico('M12 5v14M5 12h14', 17), 'Nova meta')),
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap', alignItems: 'center' } },
+        this.otherUser()
+          ? h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+            ...[['todas', 'Todas'], ['conjuntas', 'Conjuntas'], ['minhas', 'Só minhas']].map(([v, l]) =>
+              this.chip(l, (this.state.metaAba || 'todas') === v, () => this.setState({ metaAba: v }), 'var(--plum)')))
+          : h('div'),
+        h('button', { onClick: () => this.openGoal('add'), style: this.btn('primary') }, this.ico('M12 5v14M5 12h14', 17), 'Nova meta')),
       gs.length === 0 ? this.empty('Sem metas ainda', 'Cadastre onde você quer chegar: reserva de emergência, investimentos, uma viagem. Acompanhe o progresso mês a mês.', h('button', { onClick: () => this.openGoal('add'), style: this.btn('primary') }, 'Criar primeira meta'), 'ticket')
         : h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(330px,1fr))', gap: '16px' } }, ...gs.map(g => this.goalTile(g))));
   }
@@ -1574,6 +1797,19 @@ class Component extends React.Component {
         this.field('Nova senha', h('input', { type: 'password', value: f.pass || '', onChange: e => this.setF({ pass: e.target.value }), style: this.inp() })),
         this.field('Repita a nova senha', h('input', { type: 'password', value: f.pass2 || '', onChange: e => this.setF({ pass2: e.target.value }), style: this.inp() }))),
       [cancel, h('button', { onClick: () => this.changePw(), style: this.btn('primary') }, 'Salvar')]);
+    if (M.type === 'inv') return this.shell(M.mode === 'edit' ? 'Editar investimento' : 'Novo investimento',
+      h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
+        h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
+          this.field('No que está aplicado', h('input', { autoFocus: true, value: f.name || '', onChange: e => this.setF({ name: e.target.value }), placeholder: 'Ex: CDB 110% CDI', style: this.inp() }), { req: 1, flex: '2 1 200px' }),
+          this.field('Quanto tem hoje', this.money(f.value, v => this.setF({ value: v })), { req: 1, flex: '1 1 140px' })),
+        h('div', { style: { display: 'flex', gap: '12px', flexWrap: 'wrap' } },
+          this.field('Onde', h('input', { value: f.place || '', onChange: e => this.setF({ place: e.target.value }), placeholder: 'Banco, corretora…', style: this.inp() })),
+          this.field('Tipo', h('select', { value: f.kind || 'Renda fixa', onChange: e => this.setF({ kind: e.target.value }), style: this.inp() },
+            ...['Renda fixa', 'Renda variável', 'Fundo', 'Cripto', 'Poupança', 'Previdência', 'Outro'].map(k => h('option', { key: k, value: k }, k))))),
+        this.field('Atualizado em', h('input', { type: 'date', value: f.date || todayISO(), onChange: e => this.setF({ date: e.target.value }), style: this.inp() })),
+        this.field('Observações', h('textarea', { value: f.notes || '', onChange: e => this.setF({ notes: e.target.value }), rows: 2, style: this.inp({ resize: 'vertical' }) })),
+        this.sharedField(f, 'Investimento conjunto — aparece também para ')),
+      [cancel, h('button', { onClick: () => this.saveInv(), style: this.btn('primary') }, 'Salvar')]);
     if (M.type === 'tx') return this.txModal(f, cancel);
     if (M.type === 'import') return this.importModal(f, cancel);
     if (M.type === 'pay') {
